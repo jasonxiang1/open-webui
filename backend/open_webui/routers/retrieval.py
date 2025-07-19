@@ -4,12 +4,16 @@ import mimetypes
 import os
 import shutil
 import asyncio
+import aiohttp
+
+
 
 
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Union
+from urllib.parse import quote
 
 from fastapi import (
     Depends,
@@ -188,6 +192,46 @@ def get_rf(
                     raise Exception(ERROR_MESSAGES.DEFAULT("CrossEncoder error"))
 
     return rf
+
+# TODO (Feng): Optimize summary by off loading model loading to separate function
+# Need to create a separate class for summarization
+async def generate_summary(request: Request, content: str) -> str:
+    """
+    Generates a summary for the given content using an Ollama model.
+    """
+    
+    # Get the first available Ollama URL
+    ollama_url = request.app.state.config.OLLAMA_BASE_URLS[0] if request.app.state.config.OLLAMA_BASE_URLS else "http://localhost:11434"
+    
+    # Use a default model for summarization (you can make this configurable)
+    model = "llama2:latest"  # Default model, can be made configurable
+    
+    # Create the summarization prompt
+    prompt = f"Provide a concise 2 to 3 sentences summary of the following document:\n\n{content}"
+    
+    # Prepare the payload for Ollama generate API
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False
+    }
+    
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with session.post(
+                f"{ollama_url}/api/generate",
+                headers={"Content-Type": "application/json"},
+                data=json.dumps(payload)
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    return result.get("response", "").strip()
+                else:
+                    log.error(f"Ollama API error: {response.status}")
+                    return "Summary generation failed"
+    except Exception as e:
+        log.error(f"Error generating summary with Ollama: {e}")
+        return "Summary generation failed"
 
 
 ##########################################
@@ -1470,6 +1514,8 @@ def process_file(
 
         if not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
             try:
+                # Generate summary from the full text content
+                summary = asyncio.run(generate_summary(request, text_content))
                 result = save_docs_to_vector_db(
                     request,
                     docs=docs,
@@ -1478,6 +1524,7 @@ def process_file(
                         "file_id": file.id,
                         "name": file.filename,
                         "hash": hash,
+                        "summary": summary,
                     },
                     add=(True if form_data.collection_name else False),
                     user=user,
@@ -1488,6 +1535,7 @@ def process_file(
                         file.id,
                         {
                             "collection_name": collection_name,
+                            "summary": summary,
                         },
                     )
 
@@ -1496,6 +1544,7 @@ def process_file(
                         "collection_name": collection_name,
                         "filename": file.filename,
                         "content": text_content,
+                        "summary": summary,
                     }
             except Exception as e:
                 raise e
