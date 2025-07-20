@@ -1,0 +1,11 @@
+This is the second test document for batch processing.
+
+It focuses on software development and programming concepts.
+The document covers:
+- Object-oriented programming
+- Design patterns
+- Software architecture principles
+- Testing methodologies
+- Version control systems
+
+This content provides a different perspective for testing the batch processing pipeline. 

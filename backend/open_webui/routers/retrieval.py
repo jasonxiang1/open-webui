@@ -2301,6 +2301,7 @@ def process_files_batch(
         try:
             text_content = file.data.get("content", "")
 
+            summary = asyncio.run(generate_summary(request, text_content))
             docs: List[Document] = [
                 Document(
                     page_content=text_content.replace("<br/>", "\n"),
@@ -2310,6 +2311,7 @@ def process_files_batch(
                         "created_by": file.user_id,
                         "file_id": file.id,
                         "source": file.filename,
+                        "summary": summary,
                     },
                 )
             ]

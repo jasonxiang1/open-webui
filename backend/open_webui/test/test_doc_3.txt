@@ -1,0 +1,11 @@
+This is the third test document for batch processing.
+
+It explores data science and analytics topics.
+The document includes:
+- Statistical analysis methods
+- Data visualization techniques
+- Big data processing frameworks
+- Predictive modeling approaches
+- Data quality assessment
+
+This content will help test the robustness of the batch processing system with diverse content types. 

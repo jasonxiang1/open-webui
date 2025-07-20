@@ -1,14 +1,20 @@
 import os
 import asyncio
 import pytest
+import uuid
+import time
 from fastapi.testclient import TestClient
 from open_webui.main import app  # Import your FastAPI app
+from open_webui.models.files import FileModel
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Use an absolute path for the test document
 TEST_DOC_PATH = os.path.join(os.path.dirname(__file__), "test_doc.txt")
+TEST_DOC_1_PATH = os.path.join(os.path.dirname(__file__), "test_doc_1.txt")
+TEST_DOC_2_PATH = os.path.join(os.path.dirname(__file__), "test_doc_2.txt")
+TEST_DOC_3_PATH = os.path.join(os.path.dirname(__file__), "test_doc_3.txt")
 
 @pytest.mark.asyncio
 async def test_upload_and_process_file_for_summarization():
@@ -76,3 +82,99 @@ async def test_upload_and_process_file_for_summarization():
 # 3. Set a breakpoint in the `generate_summary` function in `backend/open_webui/routers/retrieval.py`.
 # 4. Run this script from your terminal using pytest:
 #    pytest backend/open_webui/test/test_summarization.py
+
+@pytest.mark.asyncio
+async def test_upload_and_process_files_batch_for_summarization():
+    """
+    Tests the file batch upload and processing pipeline to debug the generate_summary function.
+    """
+    client = TestClient(app)
+
+    # Step 1: Authenticate and get a token
+    headers = {
+        "Authorization": os.getenv("TEST_BEARER_TOKEN")
+    }
+
+    # Step 2: Upload multiple test documents
+    test_files = [
+        ("test_doc_1.txt", TEST_DOC_1_PATH),
+        ("test_doc_2.txt", TEST_DOC_2_PATH),
+        ("test_doc_3.txt", TEST_DOC_3_PATH)
+    ]
+    
+    uploaded_files = []
+    for filename, filepath in test_files:
+        with open(filepath, "rb") as f:
+            files = {"file": (filename, f, "text/plain")}
+            response = client.post("/api/v1/files/", files=files, headers=headers)
+        
+        assert response.status_code == 200
+        file_data = response.json()
+        file_id = file_data.get("id")
+        assert file_id
+        
+        # Read the file content for the batch processing
+        with open(filepath, "r") as f:
+            content = f.read()
+        
+        # Create a proper FileModel object
+        file_model = FileModel(
+            id=file_id,
+            user_id=file_data.get("user_id"),
+            filename=filename,
+            data={"content": content},
+            meta=file_data.get("meta", {}),
+            created_at=int(time.time()),
+            updated_at=int(time.time())
+        )
+        uploaded_files.append(file_model)
+        
+        print(f"File {filename} uploaded successfully with ID: {file_id}")
+
+    # Step 3: Process the batch of files
+    collection_name = f"test-batch-summary-{uuid.uuid4().hex[:8]}"
+    batch_process_data = {
+        "files": [file.model_dump() for file in uploaded_files],
+        "collection_name": collection_name
+    }
+    
+    print(f"Now processing {len(uploaded_files)} files in batch. Set your breakpoint in generate_summary.")
+    response = client.post("/api/v1/retrieval/process/files/batch", json=batch_process_data, headers=headers)
+
+    assert response.status_code == 200
+    response_data = response.json()
+    
+    print(f"Batch processing response: {response_data}")
+    
+    # Verify the response structure
+    assert "results" in response_data
+    assert "errors" in response_data
+    
+    results = response_data["results"]
+    errors = response_data["errors"]
+    
+    # Check that all files were processed successfully
+    assert len(results) == len(uploaded_files)
+    assert len(errors) == 0
+    
+    # Verify each file was processed successfully
+    for result in results:
+        assert result["status"] == "completed"
+        assert "file_id" in result
+        print(f"File {result['file_id']} processed successfully with status: {result['status']}")
+    
+    # Verify that summaries were generated for all files
+    # You can add more specific assertions here based on your expected behavior
+    print(f"All {len(results)} files processed successfully in batch")
+    print(f"Collection name: {collection_name}")
+    
+    # Optional: Query the vector database to verify documents were stored
+    # This would require additional API calls to verify the data was actually stored
+    # and that summaries are accessible in the metadata
+
+# To run this test:
+# 1. Make sure you have a test user and a valid token.
+# 2. Set environment variables TEST_USER_EMAIL, TEST_USER_PASSWORD, and TEST_BEARER_TOKEN.
+# 3. Set a breakpoint in the `generate_summary` function in `backend/open_webui/routers/retrieval.py`.
+# 4. Run this script from your terminal using pytest:
+#    pytest backend/open_webui/test/test_summarization.py::test_upload_and_process_files_batch_for_summarization
