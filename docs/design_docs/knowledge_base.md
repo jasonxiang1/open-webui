@@ -13,7 +13,7 @@ The functionality is built on a classic RAG pipeline, which consists of the foll
 ### 2.1. Data Ingestion and Processing
 
 - **Document Loading:** The system can ingest various file formats, including PDFs, Markdown files, Word documents, and audio files, using a flexible document loader architecture.
-- **Text Chunking:** The content of the documents is intelligently split into smaller, manageable chunks. This process aims to keep related sentences and paragraphs together to preserve semantic context.
+- **Text Chunking:** The content of the documents, now including the document's summary prepended to each chunk, is intelligently split into smaller, manageable chunks. This process aims to keep related sentences and paragraphs together to preserve semantic context, while also providing overall document context.
 
 ### 2_2. Embedding
 
@@ -32,8 +32,8 @@ The functionality is built on a classic RAG pipeline, which consists of the foll
 
 ### 2.5. Augmentation and Generation
 
-- The retrieved text chunks are injected into the prompt that is sent to the LLM, along with the user's original question.
-- The LLM then generates an answer based on both its pre-trained knowledge and the specific, contextual information provided from the user's knowledge base.
+- The retrieved text chunks (which now include the document's summary prepended to each chunk) are injected into the prompt that is sent to the LLM, along with the user's original question.
+- The LLM then generates a more accurate and context-aware answer based on both its pre-trained knowledge and the specific, contextual information provided from the user's knowledge base, benefiting from the enhanced context within each chunk.
 
 ## 3. Core Features
 

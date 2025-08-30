@@ -1199,6 +1199,10 @@ def save_docs_to_vector_db(
                 add_start_index=True,
             )
             docs = text_splitter.split_documents(docs)
+            if metadata and "summary" in metadata and metadata["summary"]:
+                summary_text = metadata["summary"]
+                for doc in docs:
+                    doc.page_content = f"Summary: {summary_text}\n\n{doc.page_content}"
         elif request.app.state.config.TEXT_SPLITTER == "token":
             log.info(
                 f"Using token text splitter: {request.app.state.config.TIKTOKEN_ENCODING_NAME}"
@@ -1212,6 +1216,10 @@ def save_docs_to_vector_db(
                 add_start_index=True,
             )
             docs = text_splitter.split_documents(docs)
+            if metadata and "summary" in metadata and metadata["summary"]:
+                summary_text = metadata["summary"]
+                for doc in docs:
+                    doc.page_content = f"Summary: {summary_text}\n\n{doc.page_content}"
         elif request.app.state.config.TEXT_SPLITTER == "markdown_header":
             log.info("Using markdown header text splitter")
 
@@ -1249,6 +1257,11 @@ def save_docs_to_vector_db(
                             headings_list.append(
                                 split_chunk.metadata[header_meta_key_name]
                             )
+                    
+                    # Add summary to the chunk content here
+                    if metadata and "summary" in metadata and metadata["summary"]:
+                        summary_text = metadata["summary"]
+                        split_chunk.page_content = f"Summary: {summary_text}\n\n{split_chunk.page_content}"
 
                     md_split_docs.append(
                         Document(
