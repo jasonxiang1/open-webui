@@ -11,7 +11,7 @@ Tech Stack:
 
 Frontend: SvelteKit, Svelte, TypeScript, Tailwind CSS
 
-Backend: Python, FastAPI
+Backend: Python, FastAPI, Ollama
 
 Containerization: Docker, Docker Compose
 
@@ -59,17 +59,7 @@ Dependencies: Add new Python dependencies to the pyproject.toml file.
 6. Workflow & Process
 Think First, Code Second: Before generating any significant amount of code, provide a high-level plan. Outline the files you intend to create or modify and the general approach you will take. For example:
 
-"Okay, to add the 'Model Caching' feature, I will:
-
-Create a new caching_service.py in the backend to handle the caching logic.
-
-Add a new API endpoint in routers/models.py to expose cache management.
-
-Create a new Svelte component CacheSettings.svelte for the settings UI.
-
-Update the Settings.svelte page to include the new component."
-
-Testing: All new backend logic should be accompanied by pytest unit tests. When modifying existing code, ensure existing tests still pass.
+Testing: All new backend logic should be accompanied by pytest unit tests. When modifying existing code, ensure existing tests still pass. Assume that running the backend and frontend is done separately. Do not run any Docker commands or spinning up the backend or frontend. Instead, write instructions on how to refresh or spin up the backend and frontend and assume the user will perform these actions.
 
 Documentation: Add JSDoc comments to new TypeScript functions and Python docstrings to new methods and functions. If a feature introduces new user-facing behavior, briefly describe what needs to be added to the project's documentation.
 
