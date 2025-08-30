@@ -122,7 +122,12 @@ export const getFileById = async (token: string, id: string) => {
 	return res;
 };
 
-export const updateFileDataContentById = async (token: string, id: string, content: string) => {
+export const updateFileDataContentById = async (
+	token: string,
+	id: string,
+	content: string,
+	summary: string
+) => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/files/${id}/data/content/update`, {
@@ -133,7 +138,8 @@ export const updateFileDataContentById = async (token: string, id: string, conte
 			authorization: `Bearer ${token}`
 		},
 		body: JSON.stringify({
-			content: content
+			content: content,
+			summary: summary
 		})
 	})
 		.then(async (res) => {
@@ -174,6 +180,34 @@ export const getFileContentById = async (id: string) => {
 			error = err.detail;
 			console.error(err);
 
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const generateSummaryById = async (token: string, id: string) => {
+	let error = null;
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/files/${id}/generate-summary`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
 			return null;
 		});
 

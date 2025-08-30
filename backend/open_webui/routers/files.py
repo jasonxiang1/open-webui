@@ -32,7 +32,11 @@ from open_webui.models.files import (
 from open_webui.models.knowledge import Knowledges
 
 from open_webui.routers.knowledge import get_knowledge, get_knowledge_list
-from open_webui.routers.retrieval import ProcessFileForm, process_file
+from open_webui.routers.retrieval import (
+    ProcessFileForm,
+    process_file,
+    generate_summary,
+)
 from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
@@ -364,6 +368,7 @@ async def get_file_data_content_by_id(id: str, user=Depends(get_verified_user)):
 
 class ContentForm(BaseModel):
     content: str
+    summary: Optional[str] = None
 
 
 @router.post("/{id}/data/content/update")
@@ -384,9 +389,14 @@ async def update_file_data_content_by_id(
         or has_access_to_file(id, "write", user)
     ):
         try:
+            if form_data.summary:
+                file.data["summary"] = form_data.summary
+
             process_file(
                 request,
-                ProcessFileForm(file_id=id, content=form_data.content),
+                ProcessFileForm(
+                    file_id=id, content=form_data.content, summary=form_data.summary
+                ),
                 user=user,
             )
             file = Files.get_file_by_id(id=id)
@@ -394,11 +404,47 @@ async def update_file_data_content_by_id(
             log.exception(e)
             log.error(f"Error processing file: {file.id}")
 
-        return {"content": file.data.get("content", "")}
+        return {
+            "content": file.data.get("content", ""),
+            "summary": file.data.get("summary", ""),
+        }
     else:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+
+@router.post("/{id}/generate-summary")
+async def generate_summary_by_id(request: Request, id: str, user=Depends(get_verified_user)):
+    file = Files.get_file_by_id(id)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "write", user)
+    ):
+        try:
+            # TODO: Add a notification to the user that the summary is being generated.
+            summary = await generate_summary(request, file.data.get("content", ""))
+            Files.update_file_data_by_id(id, {"summary": summary})
+            return {"summary": summary}
+        except Exception as e:
+            log.exception(e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to generate summary.",
+            )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to generate a summary for this file.",
         )
 
 

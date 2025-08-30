@@ -22,7 +22,8 @@
 		updateFileDataContentById,
 		uploadFile,
 		deleteFileById,
-		getFileById
+		getFileById,
+		generateSummaryById
 	} from '$lib/apis/files';
 	import {
 		addFileToKnowledgeById,
@@ -95,9 +96,11 @@
 	let selectedFile = null;
 	let selectedFileId = null;
 	let selectedFileContent = '';
+	let selectedFileSummary = '';
 
 	// Add cache object
 	let fileContentCache = new Map();
+	let fileSummaryCache = new Map();
 
 	$: if (selectedFileId) {
 		const file = (knowledge?.files ?? []).find((file) => file.id === selectedFileId);
@@ -419,11 +422,13 @@
 	const updateFileContentHandler = async () => {
 		const fileId = selectedFile.id;
 		const content = selectedFileContent;
+		const summary = selectedFileSummary;
 
 		// Clear the cache for this file since we're updating it
 		fileContentCache.delete(fileId);
+		fileSummaryCache.delete(fileId);
 
-		const res = updateFileDataContentById(localStorage.token, fileId, content).catch((e) => {
+		const res = updateFileDataContentById(localStorage.token, fileId, content, summary).catch((e) => {
 			toast.error(`${e}`);
 		});
 
@@ -484,14 +489,20 @@
 			// Check cache first
 			if (fileContentCache.has(file.id)) {
 				selectedFileContent = fileContentCache.get(file.id);
+				selectedFileSummary = fileSummaryCache.get(file.id);
 				return;
 			}
 
 			const response = await getFileById(localStorage.token, file.id);
 			if (response) {
 				selectedFileContent = response.data.content;
+				selectedFileSummary =
+					response.data.summary ??
+					'This document does not have a summary. You can add one here and click the save button above.';
+
 				// Cache the content
 				fileContentCache.set(file.id, response.data.content);
+				fileSummaryCache.set(file.id, selectedFileSummary);
 			} else {
 				toast.error($i18n.t('No content found in file.'));
 			}
@@ -760,7 +771,22 @@
 									</a>
 								</div>
 
-								<div>
+								<div class="flex gap-2">
+									<button
+										class="self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg"
+										on:click={async () => {
+											const res = await generateSummaryById(
+												localStorage.token,
+												selectedFile.id
+											);
+
+											if (res) {
+												selectedFileSummary = res.summary;
+											}
+										}}
+									>
+										{$i18n.t('Generate Summary')}
+									</button>
 									<button
 										class="self-center w-fit text-sm py-1 px-2.5 dark:text-gray-300 dark:hover:text-white hover:bg-black/5 dark:hover:bg-white/5 rounded-lg"
 										on:click={() => {
@@ -775,6 +801,17 @@
 							<div
 								class=" flex-1 w-full h-full max-h-full text-sm bg-transparent outline-hidden overflow-y-auto scrollbar-hidden"
 							>
+								<div class="text-lg font-semibold mb-2">Summary</div>
+								{#key selectedFile.id}
+									<RichTextInput
+										className="input-prose-sm"
+										bind:value={selectedFileSummary}
+										placeholder={$i18n.t('Add a summary here')}
+										preserveBreaks={false}
+									/>
+								{/key}
+
+								<div class="text-lg font-semibold mt-4 mb-2">Content</div>
 								{#key selectedFile.id}
 									<RichTextInput
 										className="input-prose-sm"

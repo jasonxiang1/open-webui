@@ -1364,6 +1364,7 @@ def save_docs_to_vector_db(
 class ProcessFileForm(BaseModel):
     file_id: str
     content: Optional[str] = None
+    summary: Optional[str] = None
     collection_name: Optional[str] = None
 
 
@@ -1374,6 +1375,7 @@ def process_file(
     user=Depends(get_verified_user),
 ):
     try:
+        summary = None
         file = Files.get_file_by_id(form_data.file_id)
 
         collection_name = form_data.collection_name
@@ -1406,6 +1408,7 @@ def process_file(
             ]
 
             text_content = form_data.content
+            summary = form_data.summary
         elif form_data.collection_name:
             # Check if the file has already been processed and save the content
             # Usage: /knowledge/{id}/file/add, /knowledge/{id}/file/update
@@ -1437,6 +1440,7 @@ def process_file(
                 ]
 
             text_content = file.data.get("content", "")
+            summary = file.data.get("summary", None)
         else:
             # Process the file and save the content
             # Usage: /files/
@@ -1504,18 +1508,22 @@ def process_file(
             text_content = " ".join([doc.page_content for doc in docs])
 
         log.debug(f"text_content: {text_content}")
-        Files.update_file_data_by_id(
-            file.id,
-            {"content": text_content},
-        )
 
         hash = calculate_sha256_string(text_content)
         Files.update_file_hash_by_id(file.id, hash)
 
         if not request.app.state.config.BYPASS_EMBEDDING_AND_RETRIEVAL:
             try:
-                # Generate summary from the full text content
-                summary = asyncio.run(generate_summary(request, text_content))
+                # Generate summary from the full text content if not provided
+                # TODO: check if a summary is being generated as an output
+                if summary is None:
+                    summary = asyncio.run(generate_summary(request, text_content))
+
+                Files.update_file_data_by_id(
+                    file.id,
+                    {"content": text_content, "summary": summary},
+                )
+
                 result = save_docs_to_vector_db(
                     request,
                     docs=docs,
@@ -1549,6 +1557,7 @@ def process_file(
             except Exception as e:
                 raise e
         else:
+            # TODO: add summary on the return here
             return {
                 "status": True,
                 "collection_name": None,
