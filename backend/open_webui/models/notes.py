@@ -284,9 +284,9 @@ class NoteTable:
             if 'title' in form_data:
                 note.title = form_data['title']
             if 'data' in form_data:
-                note.data = {**note.data, **form_data['data']}
+                note.data = {**(note.data or {}), **form_data['data']}
             if 'meta' in form_data:
-                note.meta = {**note.meta, **form_data['meta']}
+                note.meta = {**(note.meta or {}), **form_data['meta']}
 
             if 'access_grants' in form_data:
                 AccessGrants.set_access_grants('note', id, form_data['access_grants'], db=db)

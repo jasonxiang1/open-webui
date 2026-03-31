@@ -4,6 +4,7 @@ import base64
 import json
 import asyncio
 import logging
+from pathlib import Path
 
 from open_webui.models.groups import Groups
 from open_webui.models.models import (
@@ -35,12 +36,26 @@ from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.utils.auth import get_admin_user, get_verified_user
 from open_webui.utils.access_control import has_permission, filter_allowed_access_grants
 from open_webui.config import BYPASS_ADMIN_ACCESS_CONTROL, STATIC_DIR
+from open_webui.env import BASE_DIR
 from open_webui.internal.db import get_session
 from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def get_favicon_fallback_path() -> Path:
+    candidates = [
+        Path(STATIC_DIR) / 'favicon.png',
+        Path(BASE_DIR) / 'static' / 'favicon.png',
+    ]
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
+    return candidates[0]
 
 
 def is_valid_model_id(model_id: str) -> bool:
@@ -407,9 +422,9 @@ def get_model_profile_image(id: str, user=Depends(get_verified_user)):
                 except Exception as e:
                     pass
 
-        return FileResponse(f'{STATIC_DIR}/favicon.png')
+        return FileResponse(get_favicon_fallback_path())
     else:
-        return FileResponse(f'{STATIC_DIR}/favicon.png')
+        return FileResponse(get_favicon_fallback_path())
 
 
 ############################
