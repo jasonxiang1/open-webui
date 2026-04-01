@@ -5,12 +5,14 @@
 	import { marked } from 'marked';
 
 	import dayjs from '$lib/dayjs';
-	import { config, showSidebar, user } from '$lib/stores';
+	import { config, models, showSidebar, user } from '$lib/stores';
 	import { transcribeAudio } from '$lib/apis/audio';
 	import { getNoteById, updateNoteById } from '$lib/apis/notes';
+	import { getSkills } from '$lib/apis/skills';
 	import Mic from '$lib/components/icons/Mic.svelte';
 	import NoteIcon from '$lib/components/icons/Note.svelte';
 	import ArrowRight from '$lib/components/icons/ArrowRight.svelte';
+	import ChatPlus from '$lib/components/icons/ChatPlus.svelte';
 	import SimpleModeNotePicker from '$lib/components/simple/SimpleModeNotePicker.svelte';
 
 	type RecorderStatus = 'idle' | 'recording' | 'transcribing' | 'saving' | 'success' | 'error';
@@ -18,9 +20,26 @@
 		id: string;
 		title: string;
 	};
+	type SkillItem = {
+		id: string;
+		name?: string;
+		is_active?: boolean;
+	};
+	type DraftNoteAttachment = {
+		id: string;
+		title: string;
+		updated_at?: number;
+		type: 'note';
+		name: string;
+		description: string;
+		status: 'processed';
+	};
 
 	const i18n = getContext('i18n');
 	const STORAGE_KEY = 'simple-mode-target-note-id';
+	const COST_CHAT_BOOTSTRAP_KEY = 'simple-mode-cost-chat-bootstrap';
+	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
+	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 	const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm; codecs=opus', 'audio/mp4'];
 
 	let loaded = false;
@@ -34,6 +53,11 @@
 	let audioChunks: Blob[] = [];
 
 	const canRecord = () => status === 'idle' || status === 'success' || status === 'error';
+	const canStartCostChat = () =>
+		!!selectedNote && !['recording', 'transcribing', 'saving'].includes(status);
+
+	const describeNote = (updatedAt?: number) =>
+		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Simple Mode note');
 
 	const appendTranscript = (existingContent: string, transcript: string) => {
 		const trimmedExisting = existingContent.trim();
@@ -134,6 +158,86 @@
 		setSelectedNote(res);
 		status = 'success';
 		statusMessage = $i18n.t('Appended transcript to {{title}}.', { title: res.title });
+	};
+
+	const resolveCostEstimateSkill = async () => {
+		const skills = (await getSkills(localStorage.token).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		})) as SkillItem[] | null;
+
+		if (!skills) return null;
+
+		return (
+			skills.find(
+				(skill) =>
+					skill?.is_active !== false &&
+					[skill.id, skill.name]
+						.filter(Boolean)
+						.some((value) => value?.toLowerCase() === COST_ESTIMATE_SKILL_KEY)
+			) ?? null
+		);
+	};
+
+	const startCostChat = async () => {
+		if (!selectedNote || !canStartCostChat()) return;
+
+		const model = $models.find((item) => item.id === COST_CHAT_MODEL_ID);
+		if (!model) {
+			toast.error($i18n.t('The required model is not available.'));
+			return;
+		}
+
+		if (model?.info?.meta?.capabilities?.file_upload === false) {
+			toast.error($i18n.t('The required model does not support note attachments.'));
+			return;
+		}
+
+		const note = await getNoteById(localStorage.token, selectedNote.id).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (!note) {
+			localStorage.removeItem(STORAGE_KEY);
+			selectedNote = null;
+			status = 'error';
+			statusMessage = $i18n.t('The selected note is no longer available.');
+			return;
+		}
+
+		const skill = await resolveCostEstimateSkill();
+		if (!skill) {
+			toast.error($i18n.t('The cost-estimate skill is not available.'));
+			return;
+		}
+
+		const attachment: DraftNoteAttachment = {
+			...note,
+			type: 'note',
+			name: note.title || $i18n.t('Untitled'),
+			description: describeNote(note.updated_at),
+			status: 'processed'
+		};
+
+		sessionStorage.setItem('selectedModels', JSON.stringify([COST_CHAT_MODEL_ID]));
+		sessionStorage.setItem(
+			COST_CHAT_BOOTSTRAP_KEY,
+			JSON.stringify({
+				prompt: `<$${skill.id}|${skill.name || COST_ESTIMATE_SKILL_KEY}>\n${$i18n.t(
+					'Use the attached note to estimate project costs.'
+				)}`,
+				files: [attachment],
+				selectedToolIds: [],
+				selectedFilterIds: [],
+				webSearchEnabled: false,
+				imageGenerationEnabled: false,
+				codeInterpreterEnabled: false,
+				autoSubmit: true
+			})
+		);
+
+		await goto('/');
 	};
 
 	const handleAudioBlob = async (audioBlob: Blob) => {
@@ -356,6 +460,30 @@
 					</div>
 				</a>
 			{/if}
+		</div>
+
+		<div
+			class="absolute bottom-5 md:bottom-8 right-5 md:right-8 z-20 {$showSidebar
+				? 'md:right-8'
+				: 'right-5'}"
+		>
+			<button
+				class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg transition disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90"
+				on:click={startCostChat}
+				disabled={!canStartCostChat()}
+			>
+				<div class="flex items-center gap-3 text-left">
+					<ChatPlus className="size-4.5" />
+					<div class="min-w-[12rem] max-w-[16rem]">
+						<div class="text-xs uppercase tracking-[0.14em] text-white/70 dark:text-gray-500">
+							{$i18n.t('Next Step')}
+						</div>
+						<div class="truncate text-sm font-medium">
+							{$i18n.t('Start Cost Chat')}
+						</div>
+					</div>
+				</div>
+			</button>
 		</div>
 	</div>
 {/if}

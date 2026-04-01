@@ -109,6 +109,7 @@
 	import { getBanners } from '$lib/apis/configs';
 
 	export let chatIdProp = '';
+	const SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY = 'simple-mode-cost-chat-bootstrap';
 
 	let loading = true;
 
@@ -165,6 +166,16 @@
 	};
 
 	let taskIds = null;
+	type ChatDraft = {
+		prompt?: string;
+		files?: any[];
+		selectedToolIds?: string[];
+		selectedFilterIds?: string[];
+		webSearchEnabled?: boolean;
+		imageGenerationEnabled?: boolean;
+		codeInterpreterEnabled?: boolean;
+		autoSubmit?: boolean;
+	};
 
 	// Chat Input
 	let prompt = '';
@@ -743,16 +754,23 @@
 				codeInterpreterEnabled = false;
 
 				try {
-					const input = JSON.parse(storageChatInput);
+					const input = JSON.parse(storageChatInput) as ChatDraft;
 
 					if (!$temporaryChatEnabled) {
-						messageInput?.setText(input.prompt);
-						files = input.files;
-						selectedToolIds = input.selectedToolIds;
-						selectedFilterIds = input.selectedFilterIds;
-						webSearchEnabled = input.webSearchEnabled;
-						imageGenerationEnabled = input.imageGenerationEnabled;
-						codeInterpreterEnabled = input.codeInterpreterEnabled;
+						const draftPrompt = input.prompt ?? '';
+						messageInput?.setText(draftPrompt);
+						files = input.files ?? [];
+						selectedToolIds = input.selectedToolIds ?? [];
+						selectedFilterIds = input.selectedFilterIds ?? [];
+						webSearchEnabled = input.webSearchEnabled ?? false;
+						imageGenerationEnabled = input.imageGenerationEnabled ?? false;
+						codeInterpreterEnabled = input.codeInterpreterEnabled ?? false;
+
+						if (!chatIdProp && input.autoSubmit && draftPrompt.trim()) {
+							sessionStorage.removeItem('chat-input');
+							await tick();
+							await submitPrompt(draftPrompt);
+						}
 					}
 				} catch (e) {}
 			}
@@ -1214,6 +1232,31 @@
 					await tick();
 					submitPrompt(q);
 				}
+			}
+		}
+
+		const simpleModeBootstrap = sessionStorage.getItem(SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY);
+		if (simpleModeBootstrap) {
+			try {
+				const bootstrap = JSON.parse(simpleModeBootstrap) as ChatDraft;
+				sessionStorage.removeItem(SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY);
+
+				const draftPrompt = bootstrap.prompt ?? '';
+				files = bootstrap.files ?? [];
+				selectedToolIds = bootstrap.selectedToolIds ?? [];
+				selectedFilterIds = bootstrap.selectedFilterIds ?? [];
+				webSearchEnabled = bootstrap.webSearchEnabled ?? false;
+				imageGenerationEnabled = bootstrap.imageGenerationEnabled ?? false;
+				codeInterpreterEnabled = bootstrap.codeInterpreterEnabled ?? false;
+
+				if (draftPrompt.trim()) {
+					messageInput?.setText(draftPrompt);
+					await tick();
+					await submitPrompt(draftPrompt);
+				}
+			} catch (e) {
+				sessionStorage.removeItem(SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY);
+				console.error('Failed to restore Simple Mode cost chat bootstrap', e);
 			}
 		}
 
