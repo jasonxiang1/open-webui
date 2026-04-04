@@ -13,7 +13,7 @@
 	import NoteIcon from '$lib/components/icons/Note.svelte';
 	import ArrowRight from '$lib/components/icons/ArrowRight.svelte';
 	import ChatPlus from '$lib/components/icons/ChatPlus.svelte';
-	import SimpleModeNotePicker from '$lib/components/simple/SimpleModeNotePicker.svelte';
+	import FieldBossNotePicker from '$lib/components/fieldboss/FieldBossNotePicker.svelte';
 
 	type RecorderStatus = 'idle' | 'recording' | 'transcribing' | 'saving' | 'success' | 'error';
 	type SelectedNote = {
@@ -34,12 +34,21 @@
 		description: string;
 		status: 'processed';
 	};
+	type FieldBossResultBootstrap = {
+		prompt: string;
+		files: DraftNoteAttachment[];
+		skillId: string;
+		skillName: string;
+		modelId: string;
+		codeInterpreterEnabled: boolean;
+	};
 
 	const i18n = getContext('i18n');
-	const STORAGE_KEY = 'simple-mode-target-note-id';
-	const COST_CHAT_BOOTSTRAP_KEY = 'simple-mode-cost-chat-bootstrap';
+	const STORAGE_KEY = 'field-boss-target-note-id';
+	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
 	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
+	const COST_CHAT_CODE_INTERPRETER_ENABLED = false;
 	const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm; codecs=opus', 'audio/mp4'];
 
 	let loaded = false;
@@ -57,7 +66,7 @@
 		!!selectedNote && !['recording', 'transcribing', 'saving'].includes(status);
 
 	const describeNote = (updatedAt?: number) =>
-		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Simple Mode note');
+		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Field Boss');
 
 	const appendTranscript = (existingContent: string, transcript: string) => {
 		const trimmedExisting = existingContent.trim();
@@ -220,29 +229,23 @@
 			status: 'processed'
 		};
 
-		sessionStorage.setItem('selectedModels', JSON.stringify([COST_CHAT_MODEL_ID]));
-		sessionStorage.setItem(
-			COST_CHAT_BOOTSTRAP_KEY,
-			JSON.stringify({
-				prompt: `<$${skill.id}|${skill.name || COST_ESTIMATE_SKILL_KEY}>\n${$i18n.t(
-					'Use the attached note to estimate project costs.'
-				)}`,
-				files: [attachment],
-				selectedToolIds: [],
-				selectedFilterIds: [],
-				webSearchEnabled: false,
-				imageGenerationEnabled: false,
-				codeInterpreterEnabled: false,
-				autoSubmit: true
-			})
-		);
+		const bootstrap: FieldBossResultBootstrap = {
+			prompt: `${$i18n.t('Use the attached note to estimate project costs.')}`,
+			files: [attachment],
+			skillId: skill.id,
+			skillName: skill.name || COST_ESTIMATE_SKILL_KEY,
+			modelId: COST_CHAT_MODEL_ID,
+			codeInterpreterEnabled: COST_CHAT_CODE_INTERPRETER_ENABLED
+		};
 
-		await goto('/');
+		sessionStorage.setItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
+
+		await goto('/fieldboss/result');
 	};
 
 	const handleAudioBlob = async (audioBlob: Blob) => {
 		const ext = (audioBlob.type.split('/')[1] || 'webm').split(';')[0];
-		const file = new File([audioBlob], `simple-mode-${dayjs().format('YYYYMMDD-HHmmss')}.${ext}`, {
+		const file = new File([audioBlob], `field-boss-${dayjs().format('YYYYMMDD-HHmmss')}.${ext}`, {
 			type: audioBlob.type || 'audio/webm'
 		});
 
@@ -364,10 +367,10 @@
 </script>
 
 <svelte:head>
-	<title>{$i18n.t('Simple Mode')}</title>
+	<title>{$i18n.t('Field Boss')}</title>
 </svelte:head>
 
-<SimpleModeNotePicker
+<FieldBossNotePicker
 	bind:show={showNotePicker}
 	on:select={(event) => setSelectedNote(event.detail)}
 	on:create={(event) => setSelectedNote(event.detail)}

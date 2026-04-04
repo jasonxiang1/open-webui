@@ -274,41 +274,41 @@ Before adding new recording endpoints, check whether:
 - `transcribeAudio(...)` already does the needed upload
 - permissions depend on `chat.stt`
 
-### Simple Mode recorder and cost-chat handoff
+### Field Boss recorder and estimate flow
 - Primary route:
-  - `src/routes/(app)/simple/+page.svelte`
+  - `src/routes/(app)/fieldboss/+page.svelte`
+- Result route:
+  - `src/routes/(app)/fieldboss/result/+page.svelte`
 - Related picker:
-  - `src/lib/components/simple/SimpleModeNotePicker.svelte`
-- Chat bootstrap consumer:
-  - `src/lib/components/chat/Chat.svelte`
+  - `src/lib/components/fieldboss/FieldBossNotePicker.svelte`
 
-Simple Mode currently has two linked behaviors:
+Field Boss currently has two linked behaviors:
 - record audio, transcribe it with the built-in STT flow, and append into a selected note
-- start a new cost-estimation chat from that selected note
+- generate a one-shot estimate view from that selected note while saving the underlying exchange as a normal chat in the background
 
 Important frontend bootstrap constants used by this flow:
 
 ```ts
-const COST_CHAT_BOOTSTRAP_KEY = 'simple-mode-cost-chat-bootstrap';
+const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
 const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 ```
 
 Behavior notes:
-- the lower-left control selects or creates the target note used by Simple Mode
-- the lower-right action starts a new chat using `COST_CHAT_MODEL_ID`
-- the selected note is passed as a normal chat note attachment, not through a new backend API
+- the lower-left control selects or creates the target note used by Field Boss
+- the lower-right action opens the dedicated Field Boss result page using `COST_CHAT_MODEL_ID`
+- the selected note is still passed as a normal chat note attachment shape, not through a new backend API
 - the skill is invoked through the existing skill-mention flow, using the resolved skill id and `COST_ESTIMATE_SKILL_KEY`
-- the handoff to chat does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `COST_CHAT_BOOTSTRAP_KEY`
-- the actual auto-submit happens inside `Chat.svelte` during `initNewChat()`, so if this flow breaks, inspect that path first
+- the handoff to the result page does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `FIELD_BOSS_RESULT_BOOTSTRAP_KEY`
+- the result page creates the estimate request directly, saves the underlying exchange as a normal chat, and renders a cleaned answer-only view instead of the chat shell
 
 When changing this feature:
 - keep the note attachment shape compatible with normal chat note attachments
-- do not introduce a parallel backend endpoint for starting the chat unless the existing bootstrap path is proven insufficient
-- verify both pieces of state transfer:
+- do not introduce a parallel backend endpoint for starting the estimate flow unless the existing bootstrap path is proven insufficient
+- verify the state transfer into the result page:
   - selected model bootstrap
   - note + prompt + skill bootstrap
-- if the UI lands on an empty new chat, debug the bootstrap restore path in `Chat.svelte` before changing the model selector flow
+- if the UI lands on an empty or broken result page, debug the bootstrap restore path in `src/routes/(app)/fieldboss/result/+page.svelte` before changing the model selector flow
 
 ### Sidebar / navigation features
 - Primary files:

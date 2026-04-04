@@ -109,7 +109,7 @@
 	import { getBanners } from '$lib/apis/configs';
 
 	export let chatIdProp = '';
-	const SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY = 'simple-mode-cost-chat-bootstrap';
+	const FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY = 'field-boss-cost-chat-bootstrap';
 
 	let loading = true;
 
@@ -1235,11 +1235,11 @@
 			}
 		}
 
-		const simpleModeBootstrap = sessionStorage.getItem(SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY);
-		if (simpleModeBootstrap) {
+		const fieldBossBootstrap = sessionStorage.getItem(FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY);
+		if (fieldBossBootstrap) {
 			try {
-				const bootstrap = JSON.parse(simpleModeBootstrap) as ChatDraft;
-				sessionStorage.removeItem(SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY);
+				const bootstrap = JSON.parse(fieldBossBootstrap) as ChatDraft;
+				sessionStorage.removeItem(FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY);
 
 				const draftPrompt = bootstrap.prompt ?? '';
 				files = bootstrap.files ?? [];
@@ -1255,8 +1255,8 @@
 					await submitPrompt(draftPrompt);
 				}
 			} catch (e) {
-				sessionStorage.removeItem(SIMPLE_MODE_COST_CHAT_BOOTSTRAP_KEY);
-				console.error('Failed to restore Simple Mode cost chat bootstrap', e);
+				sessionStorage.removeItem(FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY);
+				console.error('Failed to restore Field Boss cost chat bootstrap', e);
 			}
 		}
 
