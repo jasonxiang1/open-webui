@@ -2,10 +2,11 @@
 	import { v4 as uuidv4 } from 'uuid';
 	import { getContext, onMount, tick } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { toast } from 'svelte-sonner';
 
 	import { chatCompleted } from '$lib/apis';
-	import { createNewChat, getChatList, updateChatById } from '$lib/apis/chats';
+	import { createNewChat, getChatById, getChatList, updateChatById } from '$lib/apis/chats';
 	import { getNoteById } from '$lib/apis/notes';
 	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import ContentRenderer from '$lib/components/chat/Messages/ContentRenderer.svelte';
@@ -63,6 +64,20 @@
 	const i18n = getContext('i18n');
 	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
 	const FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY = 'field-boss-result-sidebar-state';
+	const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
+
+	type FieldBossEstimateSnapshot = {
+		source: 'fieldboss-estimate';
+		noteId: string;
+		noteTitle: string;
+		modelId: string;
+		skillId: string;
+		skillName: string;
+		prompt: string;
+		rawContent: string;
+		resultContent: string;
+		createdAt: number;
+	};
 
 	let loaded = false;
 	let generating = true;
@@ -70,6 +85,7 @@
 	let resultContent = '';
 	let savedChatId: string | null = null;
 	let bootstrap: FieldBossResultBootstrap | null = null;
+	let restoredEstimate: FieldBossEstimateSnapshot | null = null;
 	let previousSidebarState: boolean | null = null;
 
 	const responseMessageId = uuidv4();
@@ -78,7 +94,8 @@
 		currentId: responseMessageId
 	};
 
-	$: selectedModel = $models.find((item) => item.id === bootstrap?.modelId) ?? null;
+	$: activeModelId = bootstrap?.modelId ?? restoredEstimate?.modelId ?? '';
+	$: selectedModel = $models.find((item) => item.id === activeModelId) ?? null;
 	$: rendererHistory =
 		resultContent || errorMessage
 			? {
@@ -89,7 +106,7 @@
 							childrenIds: [],
 							role: 'assistant',
 							content: errorMessage || resultContent,
-							model: bootstrap?.modelId ?? '',
+							model: activeModelId,
 							done: true,
 							timestamp: Math.floor(Date.now() / 1000)
 						}
@@ -397,6 +414,56 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		await goto(`/c/${savedChatId}`);
 	};
 
+	const getEstimateSnapshot = (rawContent: string, normalizedContent: string): FieldBossEstimateSnapshot | null => {
+		const note = bootstrap?.files?.[0];
+		if (!bootstrap || !note?.id) return null;
+
+		return {
+			source: 'fieldboss-estimate',
+			noteId: note.id,
+			noteTitle: note.title ?? '',
+			modelId: bootstrap.modelId,
+			skillId: bootstrap.skillId,
+			skillName: bootstrap.skillName,
+			prompt: bootstrap.prompt,
+			rawContent,
+			resultContent: normalizedContent,
+			createdAt: Date.now()
+		};
+	};
+
+	const persistEstimateSnapshot = async (chatId: string, snapshot: FieldBossEstimateSnapshot) => {
+		const updatedChat = await updateChatById(localStorage.token, chatId, {
+			models: [bootstrap.modelId],
+			history,
+			messages: createMessagesList(history, history.currentId),
+			params: { ...($settings?.params ?? {}) },
+			fieldBossEstimate: snapshot
+		});
+
+		savedChatId = updatedChat?.id ?? chatId;
+		localStorage.setItem(FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY, chatId);
+		currentChatPage.set(1);
+		chats.set(await getChatList(localStorage.token, $currentChatPage));
+	};
+
+	const restoreEstimateFromChat = async (chatIdToRestore: string) => {
+		const storedChat = await getChatById(localStorage.token, chatIdToRestore).catch(() => null);
+		const snapshot = storedChat?.chat?.fieldBossEstimate as FieldBossEstimateSnapshot | undefined;
+
+		if (!snapshot?.resultContent || snapshot.source !== 'fieldboss-estimate') {
+			await goto('/fieldboss');
+			return;
+		}
+
+		restoredEstimate = snapshot;
+		savedChatId = chatIdToRestore;
+		resultContent = snapshot.resultContent;
+		generating = false;
+		errorMessage = '';
+		loaded = true;
+	};
+
 	const getFeatures = () => ({
 		image_generation: false,
 		web_search: false,
@@ -467,9 +534,6 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			messages: createMessagesList(history, history.currentId),
 			params: { ...($settings?.params ?? {}) }
 		});
-
-		currentChatPage.set(1);
-		chats.set(await getChatList(localStorage.token, $currentChatPage));
 	};
 
 	const generateEstimate = async () => {
@@ -546,7 +610,13 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		await createSavedChat(userMessage, responseMessage);
 
 		const persistedContent = history.messages[responseMessage.id]?.content ?? rawContent;
-		resultContent = normalizeEstimateToTables(getDisplayContent(persistedContent));
+		const normalizedContent = normalizeEstimateToTables(getDisplayContent(persistedContent));
+		resultContent = normalizedContent;
+
+		const snapshot = getEstimateSnapshot(rawContent, normalizedContent);
+		if (snapshot && savedChatId) {
+			await persistEstimateSnapshot(savedChatId, snapshot);
+		}
 	};
 
 	onMount(async () => {
@@ -557,6 +627,19 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			)
 		) {
 			goto('/');
+			return;
+		}
+
+		previousSidebarState = $showSidebar;
+		sessionStorage.setItem(
+			FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY,
+			JSON.stringify(previousSidebarState)
+		);
+		showSidebar.set(false);
+
+		const restoreChatId = $page.url.searchParams.get('chatId');
+		if (restoreChatId) {
+			await restoreEstimateFromChat(restoreChatId);
 			return;
 		}
 
@@ -586,13 +669,6 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			goto('/fieldboss');
 			return;
 		}
-
-		previousSidebarState = $showSidebar;
-		sessionStorage.setItem(
-			FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY,
-			JSON.stringify(previousSidebarState)
-		);
-		showSidebar.set(false);
 
 		loaded = true;
 
@@ -689,7 +765,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 								content={resultContent}
 								history={rendererHistory}
 								messageId={responseMessageId}
-								selectedModels={[bootstrap.modelId]}
+								selectedModels={activeModelId ? [activeModelId] : []}
 								done={true}
 								model={selectedModel}
 								sources={[]}

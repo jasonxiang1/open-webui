@@ -110,6 +110,12 @@
 
 	export let chatIdProp = '';
 	const FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY = 'field-boss-cost-chat-bootstrap';
+	const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
+
+	type BackToEstimateState = {
+		enabled: boolean;
+		chatId: string | null;
+	};
 
 	let loading = true;
 
@@ -159,6 +165,10 @@
 
 	let chat = null;
 	let tags = [];
+	let backToEstimate: BackToEstimateState = {
+		enabled: false,
+		chatId: null
+	};
 
 	let history = {
 		messages: {},
@@ -182,6 +192,24 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+
+	const updateBackToEstimateState = () => {
+		const estimateSnapshot = chat?.chat?.fieldBossEstimate;
+		const latestEstimateChatId = localStorage.getItem(FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY);
+
+		backToEstimate = {
+			enabled:
+				!!chat?.id &&
+				estimateSnapshot?.source === 'fieldboss-estimate' &&
+				latestEstimateChatId === chat.id,
+			chatId: chat?.id ?? null
+		};
+	};
+
+	const openBackToEstimate = async () => {
+		if (!backToEstimate.enabled || !backToEstimate.chatId) return;
+		await goto(`/fieldboss/result?chatId=${backToEstimate.chatId}`);
+	};
 
 	$: if (chatIdProp) {
 		navigateHandler();
@@ -1280,6 +1308,8 @@
 			return null;
 		});
 
+		updateBackToEstimateState();
+
 		if (chat) {
 			tags = await getTagsById(localStorage.token, $chatId).catch(async (error) => {
 				return [];
@@ -1331,6 +1361,8 @@
 				}
 
 				await tick();
+
+				updateBackToEstimateState();
 
 				return true;
 			} else {
@@ -2887,6 +2919,8 @@
 									bind:this={messageInput}
 									{history}
 									{taskIds}
+									{backToEstimate}
+									onBackToEstimate={openBackToEstimate}
 									{selectedModels}
 									bind:files
 									bind:prompt

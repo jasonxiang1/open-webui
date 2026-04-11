@@ -95,6 +95,7 @@
 	import Knobs from '../icons/Knobs.svelte';
 	import ValvesModal from '../workspace/common/ValvesModal.svelte';
 	import Note from '../icons/Note.svelte';
+	import ArrowLeft from '../icons/ArrowLeft.svelte';
 	import { goto } from '$app/navigation';
 	import InputModal from '../common/InputModal.svelte';
 	import Expand from '../icons/Expand.svelte';
@@ -130,6 +131,11 @@
 	export let imageGenerationEnabled = false;
 	export let webSearchEnabled = false;
 	export let codeInterpreterEnabled = false;
+	export let backToEstimate: { enabled: boolean; chatId: string | null } = {
+		enabled: false,
+		chatId: null
+	};
+	export let onBackToEstimate: () => void = () => {};
 
 	export let pendingOAuthTools = [];
 
@@ -1827,7 +1833,39 @@
 									</div>
 								</div>
 
-								<div class="self-end flex space-x-1 mr-1 shrink-0 gap-[0.5px]">
+								<div class="self-end flex items-center space-x-1 mr-1 shrink-0 gap-[0.5px]">
+									<Tooltip
+										content={
+											backToEstimate.enabled &&
+											!((taskIds && taskIds.length > 0) ||
+												(history.currentId && history.messages[history.currentId]?.done != true) ||
+												generating)
+												? $i18n.t('Back to Estimate')
+												: $i18n.t('Estimate unavailable')
+										}
+									>
+										<button
+											type="button"
+											class="mr-1 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-medium transition self-center {backToEstimate.enabled &&
+											!((taskIds && taskIds.length > 0) ||
+												(history.currentId && history.messages[history.currentId]?.done != true) ||
+												generating)
+												? 'border-gray-200 bg-white/90 text-gray-700 hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800'
+												: 'border-gray-200/70 bg-white/40 text-gray-400 opacity-60 blur-[0.35px] pointer-events-none dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-500'}"
+											on:click={() => {
+												onBackToEstimate();
+											}}
+											aria-label={$i18n.t('Back to Estimate')}
+											disabled={!backToEstimate.enabled ||
+												(taskIds && taskIds.length > 0) ||
+												(history.currentId && history.messages[history.currentId]?.done != true) ||
+												generating}
+										>
+											<ArrowLeft className="size-3.5" strokeWidth="2" />
+											<span class="hidden sm:inline">{$i18n.t('Estimate')}</span>
+										</button>
+									</Tooltip>
+
 									{#if (taskIds && taskIds.length > 0) || (history.currentId && history.messages[history.currentId]?.done != true) || generating}
 										<div class=" flex items-center">
 											<Tooltip content={$i18n.t('Stop')}>
