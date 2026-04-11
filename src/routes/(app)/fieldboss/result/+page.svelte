@@ -112,6 +112,272 @@
 		return stripTaggedBlocks(withoutDetails);
 	};
 
+	const ESTIMATE_TABLE_FORMAT_INSTRUCTION = `
+Return the estimate in markdown using exactly these sections when data is available:
+
+## Excluded Items
+| Item | Reason |
+| --- | --- |
+
+## Line Items
+| Item | Quantity |  Material/Unit | Material Total | Labor Total | Task Total |
+| --- | --- | --- | --- | --- | --- |
+
+## Totals
+| Metric | Amount |
+| --- | --- |
+
+Use currency formatting like $1,234.56. Use — for missing values. Do not replace these sections with prose-only bullets.
+`.trim();
+
+	type ParsedExcludedItem = {
+		item: string;
+		reason: string;
+	};
+
+	type ParsedLineItem = {
+		item: string;
+		quantity: string;
+		materialPerUnit: string;
+		materialTotal: string;
+		laborTotal: string;
+		taskTotal: string;
+	};
+
+	type ParsedTotal = {
+		metric: string;
+		amount: string;
+	};
+
+	const escapeMarkdownCell = (value: string) =>
+		(value || '—')
+			.replace(/\|/g, '\\|')
+			.replace(/\n/g, ' ')
+			.trim() || '—';
+
+	const buildMarkdownTable = (headers: string[], rows: string[][]) => {
+		const headerLine = `| ${headers.map(escapeMarkdownCell).join(' | ')} |`;
+		const dividerLine = `| ${headers.map(() => '---').join(' | ')} |`;
+		const rowLines = rows.map(
+			(row) => `| ${row.map((cell) => escapeMarkdownCell(cell)).join(' | ')} |`
+		);
+
+		return [headerLine, dividerLine, ...rowLines].join('\n');
+	};
+
+	const hasMarkdownTable = (content: string) =>
+		/\|[^\n]+\|\n\|\s*[-:| ]+\|/m.test(content) &&
+		/(Excluded Items|Line Items|Totals)/i.test(content);
+
+	const parseExcludedItem = (line: string): ParsedExcludedItem | null => {
+		const match = line.match(/^[•*◦-]\s*(.+?)\s*:\s*(.+)$/);
+		if (!match) return null;
+
+		return {
+			item: match[1].trim(),
+			reason: match[2].trim()
+		};
+	};
+
+	const parseQuantityLine = (line: string) => {
+		const match = line.match(/^[•*◦-]\s*(.+?)\s*:\s*(.+?)(?:\s*\((.+)\))?$/);
+		if (!match) return null;
+
+		return {
+			item: match[1].trim(),
+			quantity: match[2].trim(),
+			quantityBasis: match[3]?.trim() || '—'
+		};
+	};
+
+	const parseMaterialLine = (line: string) => {
+		const match = line.match(
+			/^[•*◦-]\s*Material\s*:\s*(.+?)(?:\s*\(Total:\s*(.+?)\))?$/i
+		);
+		if (!match) return null;
+
+		return {
+			perUnit: match[1].trim(),
+			total: match[2]?.trim() || '—'
+		};
+	};
+
+	const parseLabeledAmountLine = (line: string, label: string) => {
+		const regex = new RegExp(`^[•*◦-]?\\s*${label}\\s*:\\s*(.+?)(?:\\s+total)?$`, 'i');
+		const match = line.match(regex);
+		return match?.[1]?.trim() || null;
+	};
+
+	const normalizeMetricName = (metric: string) => {
+		const normalized = metric.replace(/^Totals?\s*:\s*/i, '').trim();
+
+		if (/^cost of contingency/i.test(normalized)) return 'Contingency';
+		if (/^total cost$/i.test(normalized)) return 'Total Cost';
+		if (/^total materials?/i.test(normalized)) return 'Total Materials';
+		if (/^total labor/i.test(normalized)) return 'Total Labor';
+		if (/^subtotal/i.test(normalized)) return 'Subtotal';
+
+		return normalized;
+	};
+
+	const normalizeEstimateToTables = (content: string) => {
+		const cleaned = content.trim();
+		if (!cleaned) return cleaned;
+		if (hasMarkdownTable(cleaned)) return cleaned;
+
+		const excludedItems: ParsedExcludedItem[] = [];
+		const lineItems: ParsedLineItem[] = [];
+		const totals: ParsedTotal[] = [];
+		let currentSection: 'excluded' | 'lineItems' | 'totals' | null = null;
+		let currentLineItem: ParsedLineItem | null = null;
+
+		for (const rawLine of cleaned.split('\n')) {
+			const line = rawLine.trim();
+			if (!line) continue;
+
+			if (/^excluded items\s*:?\s*$/i.test(line)) {
+				currentSection = 'excluded';
+				currentLineItem = null;
+				continue;
+			}
+
+			if (/^(estimate summary|line items)\s*:?\s*$/i.test(line)) {
+				currentSection = /line items/i.test(line) ? 'lineItems' : null;
+				currentLineItem = null;
+				continue;
+			}
+
+			if (/^totals?\s*:?\s*$/i.test(line)) {
+				currentSection = 'totals';
+				currentLineItem = null;
+				continue;
+			}
+
+			if (/^totals?\s*:\s*/i.test(line)) {
+				currentSection = 'totals';
+				currentLineItem = null;
+
+				const inlineTotal = line.replace(/^totals?\s*:\s*/i, '').trim();
+				if (inlineTotal) {
+					const inlineMatch = inlineTotal.match(/^(.+?)\s*:\s*(.+)$/);
+					if (inlineMatch) {
+						totals.push({
+							metric: normalizeMetricName(inlineMatch[1]),
+							amount: inlineMatch[2].trim()
+						});
+					}
+				}
+				continue;
+			}
+
+			if (currentSection === 'excluded') {
+				const excludedItem = parseExcludedItem(line);
+				if (excludedItem) {
+					excludedItems.push(excludedItem);
+				}
+				continue;
+			}
+
+			if (currentSection === 'lineItems') {
+				const quantityLine = parseQuantityLine(line);
+				if (quantityLine && !/^(material|labor|task total)$/i.test(quantityLine.item)) {
+					currentLineItem = {
+						item: quantityLine.item,
+						quantity: quantityLine.quantity,
+						materialPerUnit: '—',
+						materialTotal: '—',
+						laborTotal: '—',
+						taskTotal: '—'
+					};
+					lineItems.push(currentLineItem);
+					continue;
+				}
+
+				if (!currentLineItem) continue;
+
+				const material = parseMaterialLine(line);
+				if (material) {
+					currentLineItem.materialPerUnit = material.perUnit;
+					currentLineItem.materialTotal = material.total;
+					continue;
+				}
+
+				const labor = parseLabeledAmountLine(line, 'Labor');
+				if (labor) {
+					currentLineItem.laborTotal = labor;
+					continue;
+				}
+
+				const taskTotal = parseLabeledAmountLine(line, 'Task Total');
+				if (taskTotal) {
+					currentLineItem.taskTotal = taskTotal;
+				}
+				continue;
+			}
+
+			const totalMatch = line.match(/^(.+?)\s*:\s*(.+)$/);
+			if (currentSection === 'totals' && totalMatch) {
+				totals.push({
+					metric: normalizeMetricName(totalMatch[1]),
+					amount: totalMatch[2].trim()
+				});
+			}
+		}
+
+		if (lineItems.length === 0 && totals.length === 0 && excludedItems.length === 0) {
+			return cleaned;
+		}
+
+		const sections: string[] = [];
+
+		if (excludedItems.length > 0) {
+			sections.push(
+				'## Excluded Items',
+				buildMarkdownTable(
+					['Item', 'Reason'],
+					excludedItems.map((item) => [item.item, item.reason])
+				)
+			);
+		}
+
+		if (lineItems.length > 0) {
+			sections.push(
+				'## Line Items',
+				buildMarkdownTable(
+					[
+						'Item',
+						'Quantity',
+						'Quantity Basis',
+						'Material/Unit',
+						'Material Total',
+						'Labor Total',
+						'Task Total'
+					],
+					lineItems.map((item) => [
+						item.item,
+						item.quantity,
+						item.materialPerUnit,
+						item.materialTotal,
+						item.laborTotal,
+						item.taskTotal
+					])
+				)
+			);
+		}
+
+		if (totals.length > 0) {
+			sections.push(
+				'## Totals',
+				buildMarkdownTable(
+					['Metric', 'Amount'],
+					totals.map((item) => [item.metric, item.amount])
+				)
+			);
+		}
+
+		return sections.join('\n\n').trim() || cleaned;
+	};
+
 	const restoreSidebarPreference = () => {
 		if (previousSidebarState === null) return;
 		showSidebar.set(previousSidebarState);
@@ -241,7 +507,10 @@
 			...(($settings?.system ?? '').trim()
 				? [{ role: 'system', content: `${$settings.system}` }]
 				: []),
-			{ role: 'user', content: bootstrap.prompt }
+			{
+				role: 'user',
+				content: `${bootstrap.prompt}\n\n${ESTIMATE_TABLE_FORMAT_INSTRUCTION}`.trim()
+			}
 		];
 
 		const result = await generateOpenAIChatCompletion(localStorage.token, {
@@ -277,7 +546,7 @@
 		await createSavedChat(userMessage, responseMessage);
 
 		const persistedContent = history.messages[responseMessage.id]?.content ?? rawContent;
-		resultContent = getDisplayContent(persistedContent);
+		resultContent = normalizeEstimateToTables(getDisplayContent(persistedContent));
 	};
 
 	onMount(async () => {
