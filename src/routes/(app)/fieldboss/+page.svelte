@@ -429,55 +429,49 @@
 		</div>
 
 		<div
-			class="absolute bottom-5 md:bottom-8 flex items-center gap-3 z-20 {$showSidebar
-				? 'left-[calc(var(--sidebar-width)+5.75rem)]'
-				: 'left-[5.75rem]'}"
+			class="absolute bottom-5 md:bottom-8 right-5 md:right-8 z-20 flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between {$showSidebar
+				? 'left-5 md:left-[calc(var(--sidebar-width)+5.75rem)]'
+				: 'left-5 md:left-[5.75rem]'}"
 		>
-			<button
-				class="rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 px-4 py-3 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition"
-				on:click={() => {
-					showNotePicker = true;
-				}}
-			>
-				<div class="flex items-center gap-3 text-left">
-					<NoteIcon className="size-4.5" />
-					<div class="min-w-[12rem] max-w-[16rem]">
-						<div class="text-xs uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
-							{$i18n.t('Append To')}
-						</div>
-						<div class="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
-							{selectedNote ? selectedNote.title : $i18n.t('Select or Create Note')}
+			<div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+				<button
+					class="rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 px-4 py-3 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition"
+					on:click={() => {
+						showNotePicker = true;
+					}}
+				>
+					<div class="flex items-center gap-3 text-left">
+						<NoteIcon className="size-4.5 shrink-0" />
+						<div class="min-w-0 sm:min-w-[12rem] sm:max-w-[16rem]">
+							<div class="text-xs uppercase tracking-[0.14em] text-gray-500 dark:text-gray-400">
+								{$i18n.t('Append To')}
+							</div>
+							<div class="truncate text-sm font-medium text-gray-900 dark:text-gray-100">
+								{selectedNote ? selectedNote.title : $i18n.t('Select or Create Note')}
+							</div>
 						</div>
 					</div>
-				</div>
-			</button>
+				</button>
 
-			{#if selectedNote}
-				<a
-					class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg hover:opacity-90 transition"
-					href={`/notes/${selectedNote.id}`}
-				>
-					<div class="flex items-center gap-2 text-sm font-medium">
+				{#if selectedNote}
+					<a
+						class="inline-flex items-center gap-2 self-start rounded-xl px-3 py-2 text-sm font-medium text-gray-600 hover:bg-white/70 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-gray-900/70 dark:hover:text-gray-100 transition sm:rounded-2xl sm:bg-gray-900 sm:text-white sm:px-4 sm:py-3 sm:shadow-lg sm:hover:opacity-90 sm:hover:bg-gray-900 dark:sm:bg-white dark:sm:text-gray-900"
+						href={`/notes/${selectedNote.id}`}
+					>
 						<span>{$i18n.t('Open Note')}</span>
 						<ArrowRight className="size-4" strokeWidth="2" />
-					</div>
-				</a>
-			{/if}
-		</div>
+					</a>
+				{/if}
+			</div>
 
-		<div
-			class="absolute bottom-5 md:bottom-8 right-5 md:right-8 z-20 {$showSidebar
-				? 'md:right-8'
-				: 'right-5'}"
-		>
 			<button
-				class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg transition disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90"
+				class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg transition disabled:opacity-50 disabled:cursor-not-allowed hover:opacity-90 sm:ml-auto"
 				on:click={startCostChat}
 				disabled={!canStartCostChat()}
 			>
 				<div class="flex items-center gap-3 text-left">
-					<ChatPlus className="size-4.5" />
-					<div class="min-w-[12rem] max-w-[16rem]">
+					<ChatPlus className="size-4.5 shrink-0" />
+					<div class="min-w-0 sm:min-w-[12rem] sm:max-w-[16rem]">
 						<div class="text-xs uppercase tracking-[0.14em] text-white/70 dark:text-gray-500">
 							{$i18n.t('Next Step')}
 						</div>

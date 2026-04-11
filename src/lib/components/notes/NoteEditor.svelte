@@ -95,8 +95,11 @@
 	import Cog6 from '../icons/Cog6.svelte';
 	import AiMenu from './AIMenu.svelte';
 	import AdjustmentsHorizontalOutline from '../icons/AdjustmentsHorizontalOutline.svelte';
+	import Mic from '../icons/Mic.svelte';
 
 	export let id: null | string = null;
+
+	const FIELD_BOSS_TARGET_NOTE_STORAGE_KEY = 'field-boss-target-note-id';
 
 	let editor = null;
 	let note = null;
@@ -164,6 +167,10 @@
 	$: editorHtml =
 		note?.data?.content?.html ||
 		(note?.data?.content?.md ? marked.parse(note.data.content.md) : '');
+
+	$: canOpenFieldBoss =
+		($config?.features?.enable_notes ?? false) &&
+		($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true));
 
 	const init = async () => {
 		loading = true;
@@ -619,6 +626,13 @@ ${content}
 		} else {
 			toast.error($i18n.t('Failed to delete note'));
 		}
+	};
+
+	const openInFieldBoss = async () => {
+		if (!note?.id) return;
+
+		localStorage.setItem(FIELD_BOSS_TARGET_NOTE_STORAGE_KEY, note.id);
+		await goto('/fieldboss');
 	};
 
 	const scrollToBottom = () => {
@@ -1095,6 +1109,16 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 								</NoteMenu>
 
 								{#if note?.write_access}
+									{#if canOpenFieldBoss}
+										<button
+											class="shrink-0 bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm"
+											on:click={openInFieldBoss}
+										>
+											<Mic className="size-3.5" strokeWidth="2" />
+											{$i18n.t('Field Boss')}
+										</button>
+									{/if}
+
 									<button
 										class="shrink-0 bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm"
 										on:click={() => {
