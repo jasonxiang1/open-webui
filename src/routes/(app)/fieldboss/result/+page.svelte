@@ -65,6 +65,7 @@
 	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
 	const FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY = 'field-boss-result-sidebar-state';
 	const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
+	const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
 
 	type FieldBossEstimateSnapshot = {
 		source: 'fieldboss-estimate';
@@ -443,6 +444,14 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 		savedChatId = updatedChat?.id ?? chatId;
 		localStorage.setItem(FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY, chatId);
+		const noteEstimateChatIds = JSON.parse(
+			localStorage.getItem(FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
+		) as Record<string, string>;
+		noteEstimateChatIds[snapshot.noteId] = chatId;
+		localStorage.setItem(
+			FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY,
+			JSON.stringify(noteEstimateChatIds)
+		);
 		currentChatPage.set(1);
 		chats.set(await getChatList(localStorage.token, $currentChatPage));
 	};

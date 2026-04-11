@@ -100,6 +100,7 @@
 	export let id: null | string = null;
 
 	const FIELD_BOSS_TARGET_NOTE_STORAGE_KEY = 'field-boss-target-note-id';
+	const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
 
 	let editor = null;
 	let note = null;
@@ -162,6 +163,7 @@
 	let stopResponseFlag = false;
 
 	let inputElement = null;
+	let lastEstimateChatIdForNote: string | null = null;
 
 	// Computed HTML for editor: fall back to markdown if HTML is missing
 	$: editorHtml =
@@ -171,6 +173,14 @@
 	$: canOpenFieldBoss =
 		($config?.features?.enable_notes ?? false) &&
 		($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true));
+	$: lastEstimateChatIdForNote =
+		typeof localStorage !== 'undefined' && note?.id
+		? (
+				JSON.parse(
+					localStorage.getItem(FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
+				) as Record<string, string>
+			)[note.id] ?? null
+		: null;
 
 	const init = async () => {
 		loading = true;
@@ -633,6 +643,11 @@ ${content}
 
 		localStorage.setItem(FIELD_BOSS_TARGET_NOTE_STORAGE_KEY, note.id);
 		await goto('/fieldboss');
+	};
+
+	const openLastEstimate = async () => {
+		if (!lastEstimateChatIdForNote) return;
+		await goto(`/fieldboss/result?chatId=${lastEstimateChatIdForNote}`);
 	};
 
 	const scrollToBottom = () => {
@@ -1118,6 +1133,17 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 											{$i18n.t('Field Boss')}
 										</button>
 									{/if}
+
+									<button
+										class="shrink-0 transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm {lastEstimateChatIdForNote
+											? 'bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white'
+											: 'bg-gray-50/60 text-gray-400 cursor-not-allowed dark:bg-gray-850/60 dark:text-gray-500'}"
+										on:click={openLastEstimate}
+										disabled={!lastEstimateChatIdForNote}
+									>
+										<ArrowRight className="size-3.5" strokeWidth="2" />
+										{$i18n.t('Last Estimate')}
+									</button>
 
 									<button
 										class="shrink-0 bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm"
