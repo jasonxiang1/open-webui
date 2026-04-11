@@ -25,7 +25,9 @@
 	import { compressImage, copyToClipboard, splitStream, convertHeicToJpeg } from '$lib/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
 	import { getFileById, uploadFile } from '$lib/apis/files';
+	import { getChatById } from '$lib/apis/chats';
 	import { chatCompletion, generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { getSkills } from '$lib/apis/skills';
 
 	import {
 		config,
@@ -101,6 +103,49 @@
 
 	const FIELD_BOSS_TARGET_NOTE_STORAGE_KEY = 'field-boss-target-note-id';
 	const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
+	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
+	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
+	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
+	const COST_CHAT_CODE_INTERPRETER_ENABLED = false;
+
+	type SkillItem = {
+		id: string;
+		name?: string;
+		is_active?: boolean;
+	};
+
+	type DraftNoteAttachment = {
+		id: string;
+		title: string;
+		updated_at?: number;
+		type: 'note';
+		name: string;
+		description: string;
+		status: 'processed';
+	};
+
+	type FieldBossResultBootstrap = {
+		prompt: string;
+		files: DraftNoteAttachment[];
+		skillId: string;
+		skillName: string;
+		modelId: string;
+		codeInterpreterEnabled: boolean;
+	};
+
+	type FieldBossEstimateSnapshot = {
+		source: 'fieldboss-estimate';
+		noteId: string;
+		noteTitle: string;
+		noteContentFingerprint: string;
+		modelId: string;
+		skillId: string;
+		skillName: string;
+		prompt: string;
+		rawContent: string;
+		resultContent: string;
+		createdAt: number;
+	};
 
 	let editor = null;
 	let note = null;
@@ -164,6 +209,7 @@
 
 	let inputElement = null;
 	let lastEstimateChatIdForNote: string | null = null;
+	let latestEstimateSnapshotForNote: FieldBossEstimateSnapshot | null = null;
 
 	// Computed HTML for editor: fall back to markdown if HTML is missing
 	$: editorHtml =
@@ -181,6 +227,32 @@
 				) as Record<string, string>
 			)[note.id] ?? null
 		: null;
+	$: currentNoteContentFingerprint = fingerprintNoteContent(note?.data?.content?.md ?? '');
+	$: estimateActionMode =
+		lastEstimateChatIdForNote &&
+		latestEstimateSnapshotForNote?.noteContentFingerprint === currentNoteContentFingerprint
+			? 'last'
+			: 'compute';
+
+	const fingerprintNoteContent = (content: string) => content.replace(/\r\n/g, '\n').trim();
+	const describeNote = (updatedAt?: number) =>
+		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Field Boss');
+
+	const loadLatestEstimateSnapshotForNote = async () => {
+		if (!lastEstimateChatIdForNote || !note?.id) {
+			latestEstimateSnapshotForNote = null;
+			return;
+		}
+
+		const chat = await getChatById(localStorage.token, lastEstimateChatIdForNote).catch(() => null);
+		const snapshot = chat?.chat?.fieldBossEstimate as FieldBossEstimateSnapshot | undefined;
+		latestEstimateSnapshotForNote =
+			snapshot?.source === 'fieldboss-estimate' && snapshot?.noteId === note.id ? snapshot : null;
+	};
+
+	$: if (note?.id) {
+		loadLatestEstimateSnapshotForNote();
+	}
 
 	const init = async () => {
 		loading = true;
@@ -645,9 +717,81 @@ ${content}
 		await goto('/fieldboss');
 	};
 
+	const resolveCostEstimateSkill = async () => {
+		const skills = (await getSkills(localStorage.token).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		})) as SkillItem[] | null;
+
+		if (!skills) return null;
+
+		return (
+			skills.find(
+				(skill) =>
+					skill?.is_active !== false &&
+					[skill.id, skill.name]
+						.filter(Boolean)
+						.some((value) => value?.toLowerCase() === COST_ESTIMATE_SKILL_KEY)
+			) ?? null
+		);
+	};
+
 	const openLastEstimate = async () => {
 		if (!lastEstimateChatIdForNote) return;
 		await goto(`/fieldboss/result?chatId=${lastEstimateChatIdForNote}`);
+	};
+
+	const computeEstimateFromNote = async () => {
+		if (!note?.id) return;
+
+		const model = $models.find((item) => item.id === COST_CHAT_MODEL_ID);
+		if (!model) {
+			toast.error($i18n.t('The required model is not available.'));
+			return;
+		}
+
+		if (model?.info?.meta?.capabilities?.file_upload === false) {
+			toast.error($i18n.t('The required model does not support note attachments.'));
+			return;
+		}
+
+		const skill = await resolveCostEstimateSkill();
+		if (!skill) {
+			toast.error($i18n.t('The cost-estimate skill is not available.'));
+			return;
+		}
+
+		const attachment: DraftNoteAttachment = {
+			id: note.id,
+			title: note.title || $i18n.t('Untitled'),
+			updated_at: note.updated_at,
+			type: 'note',
+			name: note.title || $i18n.t('Untitled'),
+			description: describeNote(note.updated_at),
+			status: 'processed'
+		};
+
+		const bootstrap: FieldBossResultBootstrap = {
+			prompt: `${$i18n.t('Use the attached note to estimate project costs.')}`,
+			files: [attachment],
+			skillId: skill.id,
+			skillName: skill.name || COST_ESTIMATE_SKILL_KEY,
+			modelId: COST_CHAT_MODEL_ID,
+			codeInterpreterEnabled: COST_CHAT_CODE_INTERPRETER_ENABLED
+		};
+
+		localStorage.setItem(FIELD_BOSS_TARGET_NOTE_STORAGE_KEY, note.id);
+		sessionStorage.setItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
+		await goto('/fieldboss/result');
+	};
+
+	const handleEstimateAction = async () => {
+		if (estimateActionMode === 'last' && lastEstimateChatIdForNote) {
+			await openLastEstimate();
+			return;
+		}
+
+		await computeEstimateFromNote();
 	};
 
 	const scrollToBottom = () => {
@@ -1135,14 +1279,13 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 									{/if}
 
 									<button
-										class="shrink-0 transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm {lastEstimateChatIdForNote
+										class="shrink-0 transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm {estimateActionMode === 'last' && lastEstimateChatIdForNote
 											? 'bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white'
-											: 'bg-gray-50/60 text-gray-400 cursor-not-allowed dark:bg-gray-850/60 dark:text-gray-500'}"
-										on:click={openLastEstimate}
-										disabled={!lastEstimateChatIdForNote}
+											: 'bg-gray-900 hover:bg-gray-800 text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100'}"
+										on:click={handleEstimateAction}
 									>
 										<ArrowRight className="size-3.5" strokeWidth="2" />
-										{$i18n.t('Last Estimate')}
+										{$i18n.t(estimateActionMode === 'last' ? 'Last Estimate' : 'Compute Estimate')}
 									</button>
 
 									<button

@@ -71,6 +71,7 @@
 		source: 'fieldboss-estimate';
 		noteId: string;
 		noteTitle: string;
+		noteContentFingerprint: string;
 		modelId: string;
 		skillId: string;
 		skillName: string;
@@ -88,6 +89,7 @@
 	let bootstrap: FieldBossResultBootstrap | null = null;
 	let restoredEstimate: FieldBossEstimateSnapshot | null = null;
 	let previousSidebarState: boolean | null = null;
+	let sourceNoteContentFingerprint = '';
 
 	const responseMessageId = uuidv4();
 	const history = {
@@ -123,6 +125,8 @@
 			.replace(/<\$[^>]+>/g, '')
 			.replace(/```[\s\S]*?```/g, '')
 			.trim();
+
+	const fingerprintNoteContent = (content: string) => content.replace(/\r\n/g, '\n').trim();
 
 	const getDisplayContent = (content: string) => {
 		const processed = processDetails(content);
@@ -423,6 +427,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			source: 'fieldboss-estimate',
 			noteId: note.id,
 			noteTitle: note.title ?? '',
+			noteContentFingerprint: sourceNoteContentFingerprint,
 			modelId: bootstrap.modelId,
 			skillId: bootstrap.skillId,
 			skillName: bootstrap.skillName,
@@ -678,6 +683,8 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			goto('/fieldboss');
 			return;
 		}
+
+		sourceNoteContentFingerprint = fingerprintNoteContent(note?.data?.content?.md ?? '');
 
 		loaded = true;
 
