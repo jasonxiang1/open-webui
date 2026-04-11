@@ -10,6 +10,7 @@
 	import { generateOpenAIChatCompletion } from '$lib/apis/openai';
 	import ContentRenderer from '$lib/components/chat/Messages/ContentRenderer.svelte';
 	import ArrowLeft from '$lib/components/icons/ArrowLeft.svelte';
+	import ChatPlus from '$lib/components/icons/ChatPlus.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import {
 		chats,
@@ -122,6 +123,12 @@
 	const backToFieldBoss = async () => {
 		restoreSidebarPreference();
 		await goto('/fieldboss');
+	};
+
+	const openSavedChat = async () => {
+		if (!savedChatId) return;
+		restoreSidebarPreference();
+		await goto(`/c/${savedChatId}`);
 	};
 
 	const getFeatures = () => ({
@@ -353,16 +360,29 @@
 			: ''}"
 		data-saved-chat-id={savedChatId ?? undefined}
 	>
-		<div class="absolute left-5 top-5 md:left-8 md:top-8 z-20">
-			<button
-				class="rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 px-4 py-3 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition"
-				on:click={backToFieldBoss}
-			>
-				<div class="flex items-center gap-3 text-sm font-medium text-gray-900 dark:text-gray-100">
-					<ArrowLeft className="size-4" strokeWidth="2" />
-					<span>{$i18n.t('Back to FieldBoss')}</span>
-				</div>
-			</button>
+		<div class="absolute left-5 right-5 top-5 md:left-8 md:right-8 md:top-8 z-20">
+			<div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+				<button
+					class="rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 px-4 py-3 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition self-start"
+					on:click={backToFieldBoss}
+				>
+					<div class="flex items-center gap-3 text-sm font-medium text-gray-900 dark:text-gray-100">
+						<ArrowLeft className="size-4" strokeWidth="2" />
+						<span>{$i18n.t('Back to FieldBoss')}</span>
+					</div>
+				</button>
+
+				<button
+					class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 self-start sm:self-auto"
+					on:click={openSavedChat}
+					disabled={!savedChatId}
+				>
+					<div class="flex items-center gap-3 text-sm font-medium">
+						<ChatPlus className="size-4.5" />
+						<span>{$i18n.t('Open Chat')}</span>
+					</div>
+				</button>
+			</div>
 		</div>
 
 		<div class="h-full overflow-y-auto px-6 py-24 md:px-8">
