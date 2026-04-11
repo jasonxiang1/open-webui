@@ -207,8 +207,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 		return {
 			item: match[1].trim(),
-			quantity: match[2].trim(),
-			quantityBasis: match[3]?.trim() || '—'
+			quantity: match[2].trim() || '—'
 		};
 	};
 
@@ -369,7 +368,6 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 					[
 						'Item',
 						'Quantity',
-						'Quantity Basis',
 						'Material/Unit',
 						'Material Total',
 						'Labor Total',
