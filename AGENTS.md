@@ -285,6 +285,7 @@ Before adding new recording endpoints, check whether:
 Field Boss currently has two linked behaviors:
 - record audio, transcribe it with the built-in STT flow, and append into a selected note
 - generate a one-shot estimate view from that selected note while saving the underlying exchange as a normal chat in the background
+- reopen a saved estimate later from either the originating chat or the originating note, without recomputing
 
 Important frontend bootstrap constants used by this flow:
 
@@ -294,6 +295,14 @@ const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 ```
 
+Important persistence/storage constants currently used by this flow:
+
+```ts
+const FIELD_BOSS_TARGET_NOTE_STORAGE_KEY = 'field-boss-target-note-id';
+const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
+const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
+```
+
 Behavior notes:
 - the lower-left control selects or creates the target note used by Field Boss
 - the lower-right action opens the dedicated Field Boss result page using `COST_CHAT_MODEL_ID`
@@ -301,6 +310,35 @@ Behavior notes:
 - the skill is invoked through the existing skill-mention flow, using the resolved skill id and `COST_ESTIMATE_SKILL_KEY`
 - the handoff to the result page does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `FIELD_BOSS_RESULT_BOOTSTRAP_KEY`
 - the result page creates the estimate request directly, saves the underlying exchange as a normal chat, and renders a cleaned answer-only view instead of the chat shell
+- the result page also saves a `fieldBossEstimate` snapshot on the chat object; that snapshot is the source of truth for reopening an estimate later without recomputing
+- the saved estimate snapshot currently includes:
+  - note id/title
+  - note body fingerprint (`noteContentFingerprint`)
+  - model id
+  - skill id/name
+  - prompt
+  - raw content
+  - normalized result content
+  - created timestamp
+- the result page supports two entry paths:
+  - generate-from-bootstrap via `FIELD_BOSS_RESULT_BOOTSTRAP_KEY`
+  - restore-from-chat via `/fieldboss/result?chatId=<saved-chat-id>`
+- if a restored estimate page goes blank with no backend error, first suspect a client-side render path that assumes bootstrap-only state; the restore path must render from saved snapshot state even when bootstrap is `null`
+- the result page now asks the model for markdown-table output and also normalizes legacy prose estimates into markdown tables for the dedicated estimate window
+- `Back to FieldBoss` from the estimate page should restore the note selected in Field Boss via `field-boss-target-note-id`
+
+Chat and note integration notes:
+- the regular chat composer can show a bottom-right `Estimate` action, but it is intentionally enabled only for the single globally latest estimate-backed chat, using `FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY`
+- notes use a separate note-scoped lookup via `FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY`, mapping `noteId -> latest estimate chat id for that note`
+- the note detail page (`src/lib/components/notes/NoteEditor.svelte`) now owns the primary estimate-return affordance for a note
+- the note header estimate button is adaptive:
+  - `Last Estimate` when the current note body fingerprint matches the saved estimate snapshot for that note
+  - `Compute Estimate` when the note body changed or no estimate exists yet
+- for this comparison, only note body content (`note.data.content.md`) matters; title/access-only edits should not flip the action to `Compute Estimate`
+- when `Compute Estimate` is launched from the note page, it must:
+  - set `field-boss-target-note-id` to the current note id first
+  - reuse the same model id, skill lookup, attachment shape, and bootstrap contract as Field Boss
+  - navigate through the normal Field Boss result flow rather than introducing a parallel estimate API
 
 When changing this feature:
 - keep the note attachment shape compatible with normal chat note attachments
@@ -308,7 +346,15 @@ When changing this feature:
 - verify the state transfer into the result page:
   - selected model bootstrap
   - note + prompt + skill bootstrap
-- if the UI lands on an empty or broken result page, debug the bootstrap restore path in `src/routes/(app)/fieldboss/result/+page.svelte` before changing the model selector flow
+- verify restore behavior separately from compute behavior:
+  - `/fieldboss/result` with session bootstrap
+  - `/fieldboss/result?chatId=...` with saved snapshot metadata
+- if the UI lands on an empty or broken result page, debug the bootstrap-vs-restore state split in `src/routes/(app)/fieldboss/result/+page.svelte` before changing the model selector flow
+- if a note-page estimate action behaves incorrectly, check three things before changing UI logic:
+  - whether the note-scoped chat id mapping in `FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY` is current
+  - whether the saved chat still contains valid `fieldBossEstimate` metadata
+  - whether the current note body fingerprint still matches the saved snapshot
+- keep Field Boss itself minimal; prefer putting note-specific estimate actions on the note page instead of adding more controls to the Field Boss recorder screen
 
 ### Sidebar / navigation features
 - Primary files:
