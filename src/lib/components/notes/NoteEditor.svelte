@@ -144,6 +144,7 @@
 		prompt: string;
 		rawContent: string;
 		resultContent: string;
+		structuredEstimate?: unknown;
 		createdAt: number;
 	};
 

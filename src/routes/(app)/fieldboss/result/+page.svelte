@@ -78,7 +78,69 @@
 		prompt: string;
 		rawContent: string;
 		resultContent: string;
+		structuredEstimate?: StructuredEstimateSnapshot;
 		createdAt: number;
+	};
+
+	type StructuredEstimateExcludedItem = {
+		item: string;
+		reason: string;
+	};
+
+	type StructuredEstimateLineItem = {
+		id: string;
+		item: string;
+		quantity: string;
+		originalMaterialPerUnit: string;
+		originalMaterialTotal: string;
+		originalLaborTotal: string;
+		originalTaskTotal: string;
+		taskInput: string;
+		taskTouched: boolean;
+	};
+
+	type StructuredEstimateComputedTotals = {
+		totalMaterials: string;
+		totalLabor: string;
+		subtotal: string;
+		contingency: string;
+		totalCost: string;
+		isValid: boolean;
+	};
+
+	type StructuredEstimateSnapshot = {
+		excludedItems: StructuredEstimateExcludedItem[];
+		lineItems: StructuredEstimateLineItem[];
+		contingencyPercentInput: string;
+	};
+
+	type CurrencyParseResult = {
+		state: 'valid' | 'blank' | 'invalid';
+		value: number | null;
+	};
+
+	type EvaluatedLineItem = {
+		id: string;
+		item: string;
+		quantity: string;
+		materialPerUnitDisplay: string;
+		materialTotalDisplay: string;
+		laborDisplay: string;
+		taskInput: string;
+		taskError: string;
+		taskValue: number | null;
+		isModified: boolean;
+		isInvalid: boolean;
+	};
+
+	type EvaluatedEstimate = {
+		excludedItems: StructuredEstimateExcludedItem[];
+		lineItems: EvaluatedLineItem[];
+		totals: StructuredEstimateComputedTotals;
+		contingencyPercentInput: string;
+		contingencyPercentError: string;
+		contingencyRate: number;
+		hasInvalidInputs: boolean;
 	};
 
 	let loaded = false;
@@ -90,6 +152,8 @@
 	let restoredEstimate: FieldBossEstimateSnapshot | null = null;
 	let previousSidebarState: boolean | null = null;
 	let sourceNoteContentFingerprint = '';
+	let structuredEstimate: StructuredEstimateSnapshot | null = null;
+	let estimateSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
 	const responseMessageId = uuidv4();
 	const history = {
@@ -99,6 +163,7 @@
 
 	$: activeModelId = bootstrap?.modelId ?? restoredEstimate?.modelId ?? '';
 	$: selectedModel = $models.find((item) => item.id === activeModelId) ?? null;
+	$: evaluatedEstimate = structuredEstimate ? evaluateStructuredEstimate(structuredEstimate) : null;
 	$: rendererHistory =
 		resultContent || errorMessage
 			? {
@@ -398,6 +463,336 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		return sections.join('\n\n').trim() || cleaned;
 	};
 
+	const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+	const getMarkdownTableRows = (content: string, heading: string) => {
+		const sectionMatch = content.match(
+			new RegExp(`##\\s*${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n##\\s|$)`, 'i')
+		);
+		if (!sectionMatch) return [] as string[][];
+
+		const tableLines = sectionMatch[1]
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.startsWith('|'));
+
+		if (tableLines.length < 2) return [] as string[][];
+
+		return tableLines
+			.slice(2)
+			.map((line) =>
+				line
+					.slice(1, -1)
+					.split('|')
+					.map((cell) => cell.replace(/\\\|/g, '|').trim())
+			)
+			.filter((row) => row.some((cell) => cell !== ''));
+	};
+
+	const formatCurrency = (value: number) =>
+		new Intl.NumberFormat('en-US', {
+			style: 'currency',
+			currency: 'USD',
+			minimumFractionDigits: 2,
+			maximumFractionDigits: 2
+		}).format(value);
+
+	const roundCurrency = (value: number) => Math.round(value * 100) / 100;
+
+	const parseCurrencyInput = (value: string): CurrencyParseResult => {
+		const trimmed = value.trim();
+		if (!trimmed || trimmed === '—') {
+			return { state: 'blank', value: null };
+		}
+
+		const normalized = trimmed.replace(/\$/g, '').replace(/,/g, '').replace(/\s+/g, '');
+		if (!/^-?(?:\d+(?:\.\d{0,2})?|\d+\.)$/.test(normalized)) {
+			return { state: 'invalid', value: null };
+		}
+
+		const parsed = Number.parseFloat(normalized);
+		if (!Number.isFinite(parsed)) {
+			return { state: 'invalid', value: null };
+		}
+
+		return { state: 'valid', value: parsed };
+	};
+
+	const parsePercentInput = (value: string): CurrencyParseResult => {
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return { state: 'blank', value: null };
+		}
+
+		const normalized = trimmed.replace(/%/g, '').replace(/\s+/g, '');
+		if (!/^\d+(?:\.\d{0,2})?$/.test(normalized)) {
+			return { state: 'invalid', value: null };
+		}
+
+		const parsed = Number.parseFloat(normalized);
+		if (!Number.isFinite(parsed)) {
+			return { state: 'invalid', value: null };
+		}
+
+		return { state: 'valid', value: parsed };
+	};
+
+	const normalizePercentInputForDisplay = (value: string) => {
+		const trimmed = value.trim().replace(/%/g, '');
+		if (!trimmed) return '';
+		if (/^0$/.test(trimmed)) return '0';
+		if (/^0+\d+$/.test(trimmed)) return `${Number.parseInt(trimmed, 10)}`;
+		return trimmed;
+	};
+
+	const getErrorMessage = (error: unknown, fallback: string) => {
+		if (typeof error === 'string') {
+			return error;
+		}
+
+		if (error instanceof Error) {
+			return error.message || fallback;
+		}
+
+		if (error && typeof error === 'object') {
+			const detail =
+				'detail' in error
+					? (error as { detail?: unknown }).detail
+					: 'message' in error
+						? (error as { message?: unknown }).message
+						: null;
+
+			if (typeof detail === 'string') {
+				return detail;
+			}
+
+			if (Array.isArray(detail)) {
+				const joined = detail
+					.map((item) => {
+						if (typeof item === 'string') return item;
+						if (item && typeof item === 'object' && 'msg' in item) {
+							return `${(item as { msg?: unknown }).msg ?? ''}`.trim();
+						}
+						return '';
+					})
+					.filter(Boolean)
+					.join('; ');
+
+				if (joined) return joined;
+			}
+		}
+
+		return fallback;
+	};
+
+	const rehydrateStructuredEstimate = (
+		estimate:
+			| (Partial<StructuredEstimateSnapshot> & {
+					lineItems?: Partial<StructuredEstimateLineItem>[];
+					excludedItems?: Partial<StructuredEstimateExcludedItem>[];
+			  })
+			| null
+			| undefined
+	): StructuredEstimateSnapshot | null => {
+		if (!estimate) return null;
+
+		return {
+			excludedItems: (estimate.excludedItems ?? []).map((item) => ({
+				item: item.item ?? '',
+				reason: item.reason ?? ''
+			})),
+			lineItems: (estimate.lineItems ?? []).map((lineItem, index) => ({
+				id: lineItem.id ?? `line-item-${index}`,
+				item: lineItem.item ?? '',
+				quantity: lineItem.quantity ?? '',
+				originalMaterialPerUnit: lineItem.originalMaterialPerUnit ?? '',
+				originalMaterialTotal: lineItem.originalMaterialTotal ?? '',
+				originalLaborTotal: lineItem.originalLaborTotal ?? '',
+				originalTaskTotal: lineItem.originalTaskTotal ?? '',
+				taskInput: lineItem.taskInput ?? lineItem.originalTaskTotal ?? '',
+				taskTouched: lineItem.taskTouched ?? false
+			})),
+			contingencyPercentInput: normalizePercentInputForDisplay(
+				estimate.contingencyPercentInput ?? '10'
+			)
+		};
+	};
+
+	const buildStructuredEstimate = (content: string): StructuredEstimateSnapshot | null => {
+		const normalizedContent = normalizeEstimateToTables(content);
+		const excludedRows = getMarkdownTableRows(normalizedContent, 'Excluded Items');
+		const lineItemRows = getMarkdownTableRows(normalizedContent, 'Line Items');
+
+		if (excludedRows.length === 0 && lineItemRows.length === 0) {
+			return null;
+		}
+
+		const excludedItems = excludedRows.map((row) => ({
+			item: row[0] ?? '',
+			reason: row[1] ?? ''
+		}));
+
+		const lineItems = lineItemRows.map((row, index) => ({
+			id: `line-item-${index}`,
+			item: row[0] ?? '',
+			quantity: row[1] ?? '',
+			originalMaterialPerUnit: row[2] ?? '',
+			originalMaterialTotal: row[3] ?? '',
+			originalLaborTotal: row[4] ?? '',
+			originalTaskTotal: row[5] ?? '',
+			taskInput: row[5] ?? '',
+			taskTouched: false
+		}));
+
+		return rehydrateStructuredEstimate({
+			excludedItems,
+			lineItems,
+			contingencyPercentInput: '10'
+		});
+	};
+
+	const getFieldError = (value: string, touched: boolean) => {
+		if (!touched) return '';
+
+		const parsed = parseCurrencyInput(value);
+		if (parsed.state === 'blank') return $i18n.t('Enter a number');
+		if (parsed.state === 'invalid') return $i18n.t('Enter a valid amount');
+		return '';
+	};
+
+	const formatMaterialPerUnitDisplay = (value: string) =>
+		value
+			.trim()
+			.replace(/\s*\/unit\s*$/i, '')
+			.trim();
+
+	const isLineItemModified = (lineItem: StructuredEstimateLineItem) => lineItem.taskTouched;
+
+	const evaluateStructuredEstimate = (
+		estimate: StructuredEstimateSnapshot
+	): EvaluatedEstimate => {
+		const lineItems = estimate.lineItems.map((lineItem) => {
+			const isModified = isLineItemModified(lineItem);
+			const taskParsed = parseCurrencyInput(lineItem.taskInput);
+			const taskError = getFieldError(lineItem.taskInput, lineItem.taskTouched);
+			const originalTaskParsed = parseCurrencyInput(lineItem.originalTaskTotal);
+			const taskValue =
+				taskParsed.state === 'valid'
+					? taskParsed.value
+					: !isModified && originalTaskParsed.state === 'valid'
+						? originalTaskParsed.value
+						: null;
+			const isInvalid =
+				!!taskError || (isModified && taskParsed.state !== 'valid') || (!isModified && taskValue === null);
+
+			return {
+				id: lineItem.id,
+				item: lineItem.item,
+				quantity: lineItem.quantity,
+				materialPerUnitDisplay: isModified
+					? ''
+					: formatMaterialPerUnitDisplay(lineItem.originalMaterialPerUnit),
+				materialTotalDisplay: isModified || isInvalid ? '' : lineItem.originalMaterialTotal,
+				laborDisplay: isModified || isInvalid ? '' : lineItem.originalLaborTotal,
+				taskInput: lineItem.taskInput,
+				taskError,
+				taskValue,
+				isModified,
+				isInvalid
+			};
+		});
+
+		const hasInvalidInputs = lineItems.some((lineItem) => lineItem.isInvalid);
+		const hasEditedRows = lineItems.some((lineItem) => lineItem.isModified);
+		const contingencyPercentParsed = parsePercentInput(estimate.contingencyPercentInput);
+		const contingencyPercentError =
+			contingencyPercentParsed.state === 'blank'
+				? $i18n.t('Enter a percentage')
+				: contingencyPercentParsed.state === 'invalid'
+					? $i18n.t('Enter a valid percentage')
+					: '';
+		const contingencyRate =
+			contingencyPercentParsed.state === 'valid'
+				? (contingencyPercentParsed.value ?? 0) / 100
+				: null;
+
+		if (hasInvalidInputs) {
+			return {
+				excludedItems: estimate.excludedItems,
+				lineItems,
+				contingencyPercentInput: estimate.contingencyPercentInput,
+				contingencyPercentError,
+				contingencyRate: contingencyRate ?? 0.1,
+				hasInvalidInputs,
+				totals: {
+					totalMaterials: '',
+					totalLabor: '',
+					subtotal: '',
+					contingency: '',
+					totalCost: '',
+					isValid: false
+				}
+			};
+		}
+
+		const totalMaterials = hasEditedRows
+			? ''
+			: formatCurrency(
+					roundCurrency(
+						lineItems.reduce((sum, _lineItem, index) => {
+							const parsed = parseCurrencyInput(estimate.lineItems[index].originalMaterialTotal);
+							return sum + (parsed.state === 'valid' ? (parsed.value ?? 0) : 0);
+						}, 0)
+					)
+				);
+		const totalLabor = hasEditedRows
+			? ''
+			: formatCurrency(
+					roundCurrency(
+						lineItems.reduce((sum, _lineItem, index) => {
+							const parsed = parseCurrencyInput(estimate.lineItems[index].originalLaborTotal);
+							return sum + (parsed.state === 'valid' ? (parsed.value ?? 0) : 0);
+						}, 0)
+					)
+				);
+		const subtotal = roundCurrency(
+			lineItems.reduce((sum, lineItem) => sum + (lineItem.taskValue ?? 0), 0)
+		);
+		const contingency =
+			contingencyRate === null ? null : roundCurrency(subtotal * contingencyRate);
+		const totalCost = contingency === null ? null : roundCurrency(subtotal + contingency);
+
+		return {
+			excludedItems: estimate.excludedItems,
+			lineItems,
+			contingencyPercentInput: estimate.contingencyPercentInput,
+			contingencyPercentError,
+			contingencyRate: contingencyRate ?? 0.1,
+			hasInvalidInputs,
+			totals: {
+				totalMaterials,
+				totalLabor,
+				subtotal: formatCurrency(subtotal),
+				contingency: contingency === null ? '' : formatCurrency(contingency),
+				totalCost: totalCost === null ? '' : formatCurrency(totalCost),
+				isValid: contingency !== null && totalCost !== null
+			}
+		};
+	};
+
+	const serializeStructuredEstimate = (
+		estimate: StructuredEstimateSnapshot | null
+	): StructuredEstimateSnapshot | undefined =>
+		estimate
+			? {
+					excludedItems: estimate.excludedItems,
+					lineItems: estimate.lineItems,
+					contingencyPercentInput: normalizePercentInputForDisplay(
+						estimate.contingencyPercentInput
+					)
+				}
+			: undefined;
+
 	const restoreSidebarPreference = () => {
 		if (previousSidebarState === null) return;
 		showSidebar.set(previousSidebarState);
@@ -407,56 +802,107 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 	};
 
 	const backToFieldBoss = async () => {
+		if (estimateSaveTimeout) clearTimeout(estimateSaveTimeout);
 		restoreSidebarPreference();
 		await goto('/fieldboss');
 	};
 
 	const openSavedChat = async () => {
 		if (!savedChatId) return;
+		if (estimateSaveTimeout) clearTimeout(estimateSaveTimeout);
 		restoreSidebarPreference();
 		await goto(`/c/${savedChatId}`);
 	};
 
-	const getEstimateSnapshot = (rawContent: string, normalizedContent: string): FieldBossEstimateSnapshot | null => {
-		const note = bootstrap?.files?.[0];
-		if (!bootstrap || !note?.id) return null;
+	const getEstimateSnapshot = (
+		rawContent: string,
+		normalizedContent: string,
+		nextStructuredEstimate: StructuredEstimateSnapshot | null
+	): FieldBossEstimateSnapshot | null => {
+		const source = bootstrap ?? restoredEstimate;
+		const noteId = bootstrap?.files?.[0]?.id ?? restoredEstimate?.noteId;
+		const noteTitle = bootstrap?.files?.[0]?.title ?? restoredEstimate?.noteTitle ?? '';
+		if (!source || !noteId) return null;
 
 		return {
 			source: 'fieldboss-estimate',
-			noteId: note.id,
-			noteTitle: note.title ?? '',
+			noteId,
+			noteTitle,
 			noteContentFingerprint: sourceNoteContentFingerprint,
-			modelId: bootstrap.modelId,
-			skillId: bootstrap.skillId,
-			skillName: bootstrap.skillName,
-			prompt: bootstrap.prompt,
+			modelId: source.modelId,
+			skillId: source.skillId,
+			skillName: source.skillName,
+			prompt: source.prompt,
 			rawContent,
 			resultContent: normalizedContent,
+			structuredEstimate: serializeStructuredEstimate(nextStructuredEstimate),
 			createdAt: Date.now()
 		};
 	};
 
-	const persistEstimateSnapshot = async (chatId: string, snapshot: FieldBossEstimateSnapshot) => {
-		const updatedChat = await updateChatById(localStorage.token, chatId, {
-			models: [bootstrap.modelId],
-			history,
-			messages: createMessagesList(history, history.currentId),
-			params: { ...($settings?.params ?? {}) },
-			fieldBossEstimate: snapshot
-		});
-
-		savedChatId = updatedChat?.id ?? chatId;
+	const syncEstimateSnapshotMetadata = (chatId: string, noteId: string) => {
 		localStorage.setItem(FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY, chatId);
 		const noteEstimateChatIds = JSON.parse(
 			localStorage.getItem(FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
 		) as Record<string, string>;
-		noteEstimateChatIds[snapshot.noteId] = chatId;
+		noteEstimateChatIds[noteId] = chatId;
 		localStorage.setItem(
 			FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY,
 			JSON.stringify(noteEstimateChatIds)
 		);
+	};
+
+	const refreshEstimateChats = async () => {
 		currentChatPage.set(1);
 		chats.set(await getChatList(localStorage.token, $currentChatPage));
+	};
+
+	const persistEstimateSnapshot = async (
+		chatId: string,
+		snapshot: FieldBossEstimateSnapshot,
+		options?: { syncMetadata?: boolean; refreshChats?: boolean }
+	) => {
+		const updatedChat = await updateChatById(localStorage.token, chatId, {
+			fieldBossEstimate: snapshot
+		});
+
+		savedChatId = updatedChat?.id ?? chatId;
+
+		if (options?.syncMetadata) {
+			syncEstimateSnapshotMetadata(chatId, snapshot.noteId);
+		}
+
+		if (options?.refreshChats) {
+			await refreshEstimateChats();
+		}
+	};
+
+	const persistCurrentEstimateSnapshot = async () => {
+		if (!savedChatId) return;
+
+		const snapshot = getEstimateSnapshot(
+			restoredEstimate?.rawContent ?? history.messages[responseMessageId]?.content ?? '',
+			resultContent,
+			structuredEstimate
+		);
+		if (!snapshot) return;
+
+		restoredEstimate = snapshot;
+		await persistEstimateSnapshot(savedChatId, snapshot);
+	};
+
+	const scheduleEstimateSnapshotSave = () => {
+		if (!savedChatId || !structuredEstimate) return;
+		if (estimateSaveTimeout) {
+			clearTimeout(estimateSaveTimeout);
+		}
+
+		estimateSaveTimeout = setTimeout(async () => {
+			estimateSaveTimeout = null;
+			await persistCurrentEstimateSnapshot().catch((error) => {
+				console.error(error);
+			});
+		}, 300);
 	};
 
 	const restoreEstimateFromChat = async (chatIdToRestore: string) => {
@@ -470,7 +916,11 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 		restoredEstimate = snapshot;
 		savedChatId = chatIdToRestore;
+		sourceNoteContentFingerprint = snapshot.noteContentFingerprint ?? '';
 		resultContent = snapshot.resultContent;
+		structuredEstimate = rehydrateStructuredEstimate(
+			snapshot.structuredEstimate ?? buildStructuredEstimate(snapshot.resultContent)
+		);
 		generating = false;
 		errorMessage = '';
 		loaded = true;
@@ -548,6 +998,36 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		});
 	};
 
+	const handleEditableLineItemInput = (lineItemId: string, value: string) => {
+		if (!structuredEstimate) return;
+
+		structuredEstimate = {
+			...structuredEstimate,
+			lineItems: structuredEstimate.lineItems.map((lineItem) =>
+				lineItem.id === lineItemId
+					? {
+							...lineItem,
+							taskInput: value,
+							taskTouched: true
+						}
+					: lineItem
+			)
+		};
+
+		scheduleEstimateSnapshotSave();
+	};
+
+	const handleContingencyPercentInput = (value: string) => {
+		if (!structuredEstimate) return;
+
+		structuredEstimate = {
+			...structuredEstimate,
+			contingencyPercentInput: normalizePercentInputForDisplay(value)
+		};
+
+		scheduleEstimateSnapshotSave();
+	};
+
 	const generateEstimate = async () => {
 		if (!bootstrap) {
 			await goto('/fieldboss');
@@ -601,9 +1081,6 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			features: getFeatures(),
 			model_item: selectedModel,
 			session_id: $socket?.id
-		}).catch((error) => {
-			console.error(error);
-			return null;
 		});
 
 		if (!result) {
@@ -624,10 +1101,15 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		const persistedContent = history.messages[responseMessage.id]?.content ?? rawContent;
 		const normalizedContent = normalizeEstimateToTables(getDisplayContent(persistedContent));
 		resultContent = normalizedContent;
+		structuredEstimate = buildStructuredEstimate(normalizedContent);
 
-		const snapshot = getEstimateSnapshot(rawContent, normalizedContent);
+		const snapshot = getEstimateSnapshot(rawContent, normalizedContent, structuredEstimate);
 		if (snapshot && savedChatId) {
-			await persistEstimateSnapshot(savedChatId, snapshot);
+			restoredEstimate = snapshot;
+			await persistEstimateSnapshot(savedChatId, snapshot, {
+				syncMetadata: true,
+				refreshChats: true
+			});
 		}
 	};
 
@@ -700,7 +1182,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			await generateEstimate();
 		} catch (error) {
 			console.error(error);
-			errorMessage = error instanceof Error ? error.message : `${error}`;
+			errorMessage = getErrorMessage(error, $i18n.t('Failed to generate estimate.'));
 			toast.error(errorMessage);
 		} finally {
 			generating = false;
@@ -773,6 +1255,208 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 								</div>
 								<div class="text-sm text-gray-700 dark:text-gray-300 whitespace-pre-wrap">
 									{errorMessage}
+								</div>
+							</div>
+						{:else if evaluatedEstimate}
+							<div class="space-y-8">
+								{#if evaluatedEstimate.excludedItems.length > 0}
+									<div class="space-y-4">
+										<div class="text-2xl font-medium text-gray-900 dark:text-gray-100">
+											{$i18n.t('Excluded Items')}
+										</div>
+										<div class="overflow-x-auto">
+											<table class="w-full min-w-[28rem] table-auto border-collapse text-left">
+												<thead>
+													<tr class="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400">
+														<th class="px-4 py-3 text-sm font-semibold uppercase tracking-wide">
+															{$i18n.t('Item')}
+														</th>
+														<th class="px-4 py-3 text-sm font-semibold uppercase tracking-wide">
+															{$i18n.t('Reason')}
+														</th>
+													</tr>
+												</thead>
+												<tbody>
+													{#each evaluatedEstimate.excludedItems as item}
+														<tr class="border-b border-gray-100 dark:border-gray-850 align-top">
+															<td class="px-4 py-3 text-base text-gray-900 dark:text-gray-100">
+																{item.item}
+															</td>
+															<td class="px-4 py-3 text-base text-gray-700 dark:text-gray-300">
+																{item.reason}
+															</td>
+														</tr>
+													{/each}
+												</tbody>
+											</table>
+										</div>
+									</div>
+								{/if}
+
+								<div class="space-y-4">
+									<div class="text-2xl font-medium text-gray-900 dark:text-gray-100">
+										{$i18n.t('Line Items')}
+									</div>
+									<div class="overflow-x-auto">
+										<table class="w-full min-w-[48rem] table-fixed border-collapse text-left md:min-w-0">
+											<thead>
+												<tr class="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400">
+													<th class="w-[24%] px-3 py-3 text-sm font-semibold uppercase tracking-wide md:px-2.5">
+														{$i18n.t('Item')}
+													</th>
+													<th class="w-[10%] px-3 py-3 text-sm font-semibold uppercase tracking-wide md:px-2.5">
+														{$i18n.t('Quantity')}
+													</th>
+													<th class="w-[14%] px-3 py-3 text-sm font-semibold uppercase tracking-wide md:px-2.5">
+														{$i18n.t('Material/Unit')}
+													</th>
+													<th class="w-[14%] px-3 py-3 text-sm font-semibold uppercase tracking-wide md:px-2.5">
+														{$i18n.t('Material Total')}
+													</th>
+													<th class="w-[19%] px-3 py-3 text-sm font-semibold uppercase tracking-wide md:px-2.5">
+														{$i18n.t('Labor Total')}
+													</th>
+													<th class="w-[19%] px-3 py-3 text-sm font-semibold uppercase tracking-wide md:px-2.5">
+														{$i18n.t('Task Total')}
+													</th>
+												</tr>
+											</thead>
+											<tbody>
+												{#each evaluatedEstimate.lineItems as lineItem}
+													<tr class="border-b border-gray-100 dark:border-gray-850 align-top">
+														<td class="px-3 py-4 text-base text-gray-900 dark:text-gray-100 md:px-2.5">
+															<div class="max-w-[12rem] whitespace-normal md:max-w-none break-words">
+																{lineItem.item}
+															</div>
+														</td>
+														<td class="px-3 py-4 text-base text-gray-700 dark:text-gray-300 md:px-2.5">
+															{lineItem.quantity}
+														</td>
+														<td class="px-3 py-4 text-base text-gray-700 dark:text-gray-300 md:px-2.5 break-words">
+															{lineItem.materialPerUnitDisplay}
+														</td>
+														<td class="px-3 py-4 text-base text-gray-700 dark:text-gray-300 md:px-2.5">
+															<div>{lineItem.materialTotalDisplay}</div>
+														</td>
+														<td class="px-3 py-4 text-base text-gray-700 dark:text-gray-300 md:px-2.5">
+															{lineItem.laborDisplay}
+														</td>
+														<td class="px-3 py-4 md:px-2.5">
+															<input
+																class="w-full min-w-[7rem] rounded-xl border bg-white px-2.5 py-2 text-base text-gray-900 outline-none transition md:min-w-0 dark:bg-gray-950 dark:text-gray-100 {lineItem.taskError
+																	? 'border-red-400 focus:border-red-500'
+																	: 'border-gray-200 focus:border-gray-400 dark:border-gray-800 dark:focus:border-gray-600'}"
+																value={lineItem.taskInput}
+																on:input={(event) =>
+																	handleEditableLineItemInput(
+																		lineItem.id,
+																		(event.currentTarget as HTMLInputElement).value
+																	)}
+															/>
+															{#if lineItem.taskError}
+																<div class="mt-1 text-xs text-red-500 dark:text-red-400">
+																	{lineItem.taskError}
+																</div>
+															{/if}
+														</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								</div>
+
+								<div class="space-y-4">
+									<div class="text-2xl font-medium text-gray-900 dark:text-gray-100">
+										{$i18n.t('Totals')}
+									</div>
+									<div class="overflow-x-auto">
+										<table class="w-full min-w-[28rem] table-auto border-collapse text-left">
+											<thead>
+												<tr class="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400">
+													<th class="px-4 py-3 text-sm font-semibold uppercase tracking-wide">
+														{$i18n.t('Metric')}
+													</th>
+													<th class="px-4 py-3 text-sm font-semibold uppercase tracking-wide">
+														{$i18n.t('Amount')}
+													</th>
+												</tr>
+											</thead>
+											<tbody>
+												<tr class="border-b border-gray-100 dark:border-gray-850">
+													<td class="px-4 py-3 text-base text-gray-900 dark:text-gray-100">
+														{$i18n.t('Total Materials')}
+													</td>
+													<td class="px-4 py-3 text-base text-gray-700 dark:text-gray-300">
+														{evaluatedEstimate.totals.totalMaterials}
+													</td>
+												</tr>
+												<tr class="border-b border-gray-100 dark:border-gray-850">
+													<td class="px-4 py-3 text-base text-gray-900 dark:text-gray-100">
+														{$i18n.t('Total Labor')}
+													</td>
+													<td class="px-4 py-3 text-base text-gray-700 dark:text-gray-300">
+														{evaluatedEstimate.totals.totalLabor}
+													</td>
+												</tr>
+												<tr class="border-b border-gray-100 dark:border-gray-850">
+													<td class="px-4 py-3 text-base text-gray-900 dark:text-gray-100">
+														{$i18n.t('Subtotal')}
+													</td>
+													<td class="px-4 py-3 text-base text-gray-700 dark:text-gray-300">
+														{evaluatedEstimate.totals.subtotal}
+													</td>
+												</tr>
+												<tr class="border-b border-gray-100 dark:border-gray-850">
+													<td class="px-4 py-3 text-base text-gray-900 dark:text-gray-100">
+														{$i18n.t('Contingency')}
+													</td>
+													<td class="px-4 py-3 text-base text-gray-700 dark:text-gray-300">
+														<div class="flex items-center justify-between gap-3">
+															<span>{evaluatedEstimate.totals.contingency}</span>
+															<div class="flex flex-col items-end gap-1">
+																<div class="flex items-center gap-2">
+																	<input
+																		class="w-[4.5rem] rounded-xl border bg-white px-2.5 py-2 text-base text-gray-900 outline-none transition dark:bg-gray-950 dark:text-gray-100 {evaluatedEstimate.contingencyPercentError
+																			? 'border-red-400 focus:border-red-500'
+																			: 'border-gray-200 focus:border-gray-400 dark:border-gray-800 dark:focus:border-gray-600'}"
+																		value={evaluatedEstimate.contingencyPercentInput}
+																		on:focus={(event) =>
+																			(event.currentTarget as HTMLInputElement).select()}
+																		on:input={(event) =>
+																			handleContingencyPercentInput(
+																				(event.currentTarget as HTMLInputElement).value
+																			)}
+																	/>
+																	<span class="text-base text-gray-500 dark:text-gray-400">%</span>
+																</div>
+																{#if evaluatedEstimate.contingencyPercentError}
+																	<div class="text-xs text-red-500 dark:text-red-400">
+																		{evaluatedEstimate.contingencyPercentError}
+																	</div>
+																{/if}
+															</div>
+														</div>
+													</td>
+												</tr>
+												<tr>
+													<td class="px-4 py-3 text-base font-semibold text-gray-900 dark:text-gray-100">
+														{$i18n.t('Total Cost')}
+													</td>
+													<td class="px-4 py-3 text-base font-semibold text-gray-900 dark:text-gray-100">
+														{evaluatedEstimate.totals.totalCost}
+													</td>
+												</tr>
+											</tbody>
+										</table>
+									</div>
+									{#if evaluatedEstimate.hasInvalidInputs || evaluatedEstimate.contingencyPercentError}
+										<div class="text-sm text-red-500 dark:text-red-400">
+											{evaluatedEstimate.hasInvalidInputs
+												? $i18n.t('Fix invalid line-item amounts to recalculate totals.')
+												: $i18n.t('Fix the contingency percentage to recalculate totals.')}
+										</div>
+									{/if}
 								</div>
 							</div>
 						{:else if resultContent}
