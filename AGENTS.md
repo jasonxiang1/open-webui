@@ -274,15 +274,15 @@ Before adding new recording endpoints, check whether:
 - `transcribeAudio(...)` already does the needed upload
 - permissions depend on `chat.stt`
 
-### Field Boss recorder and estimate flow
+### Clara recorder and estimate flow
 - Primary route:
-  - `src/routes/(app)/fieldboss/+page.svelte`
+  - `src/routes/(app)/clara/+page.svelte`
 - Result route:
-  - `src/routes/(app)/fieldboss/result/+page.svelte`
+  - `src/routes/(app)/clara/result/+page.svelte`
 - Related picker:
-  - `src/lib/components/fieldboss/FieldBossNotePicker.svelte`
+  - `src/lib/components/clara/ClaraNotePicker.svelte`
 
-Field Boss currently has two linked behaviors:
+Clara currently has two linked behaviors:
 - record audio, transcribe it with the built-in STT flow, and append into a selected note
 - generate a one-shot estimate view from that selected note while saving the underlying exchange as a normal chat in the background
 - reopen a saved estimate later from either the originating chat or the originating note, without recomputing
@@ -290,7 +290,7 @@ Field Boss currently has two linked behaviors:
 Important frontend bootstrap constants used by this flow:
 
 ```ts
-const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
+const CLARA_RESULT_BOOTSTRAP_KEY = 'clara-result-bootstrap';
 const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 ```
@@ -298,19 +298,21 @@ const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 Important persistence/storage constants currently used by this flow:
 
 ```ts
-const FIELD_BOSS_TARGET_NOTE_STORAGE_KEY = 'field-boss-target-note-id';
-const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
-const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
+const CLARA_TARGET_NOTE_STORAGE_KEY = 'clara-target-note-id';
+const CLARA_LATEST_ESTIMATE_CHAT_ID_KEY = 'clara-latest-estimate-chat-id';
+const CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY = 'clara-note-estimate-chat-ids';
 ```
 
 Behavior notes:
-- the lower-left control selects or creates the target note used by Field Boss
-- the lower-right action opens the dedicated Field Boss result page using `COST_CHAT_MODEL_ID`
+- the lower-left control selects or creates the target note used by Clara
+- the lower-right action opens the dedicated Clara result page using `COST_CHAT_MODEL_ID`
 - the selected note is still passed as a normal chat note attachment shape, not through a new backend API
 - the skill is invoked through the existing skill-mention flow, using the resolved skill id and `COST_ESTIMATE_SKILL_KEY`
-- the handoff to the result page does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `FIELD_BOSS_RESULT_BOOTSTRAP_KEY`
-- the result page creates the estimate request directly, saves the underlying exchange as a normal chat, and renders a cleaned answer-only view instead of the chat shell
-- the result page also saves a `fieldBossEstimate` snapshot on the chat object; that snapshot is the source of truth for reopening an estimate later without recomputing
+- the handoff to the result page does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `CLARA_RESULT_BOOTSTRAP_KEY`
+- the result page creates the estimate request directly, saves the underlying exchange as a normal chat, and renders either:
+  - an interactive structured estimate view when line-item/totals tables can be parsed
+  - a cleaned markdown/content fallback view when structured parsing is unavailable
+- the result page also saves a `claraEstimate` snapshot on the chat object; that snapshot is the source of truth for reopening an estimate later without recomputing
 - the saved estimate snapshot currently includes:
   - note id/title
   - note body fingerprint (`noteContentFingerprint`)
@@ -319,26 +321,91 @@ Behavior notes:
   - prompt
   - raw content
   - normalized result content
+  - optional `structuredEstimate` payload for the interactive table view
   - created timestamp
 - the result page supports two entry paths:
-  - generate-from-bootstrap via `FIELD_BOSS_RESULT_BOOTSTRAP_KEY`
-  - restore-from-chat via `/fieldboss/result?chatId=<saved-chat-id>`
+  - generate-from-bootstrap via `CLARA_RESULT_BOOTSTRAP_KEY`
+  - restore-from-chat via `/clara/result?chatId=<saved-chat-id>`
 - if a restored estimate page goes blank with no backend error, first suspect a client-side render path that assumes bootstrap-only state; the restore path must render from saved snapshot state even when bootstrap is `null`
-- the result page now asks the model for markdown-table output and also normalizes legacy prose estimates into markdown tables for the dedicated estimate window
-- `Back to FieldBoss` from the estimate page should restore the note selected in Field Boss via `field-boss-target-note-id`
+- the result page asks the model for markdown-table output and also normalizes legacy prose-style estimates into markdown tables for the dedicated estimate window
+- `Back to Clara` from the estimate page should restore the note selected in Clara via `clara-target-note-id`
+
+Current result-page interaction model:
+- the interactive estimate renderer lives entirely in `src/routes/(app)/clara/result/+page.svelte`
+- there is no separate backend estimate schema or API for line-item editing; the page derives its structured state client-side from the saved/generated markdown tables
+- the page persists only source-of-truth editable fields in `claraEstimate.structuredEstimate`; derived totals and validation flags are recomputed client-side on render
+- the current structured snapshot shape is:
+  - `excludedItems: { item, reason }[]`
+  - `lineItems: { id, item, quantity, originalMaterialPerUnit, originalMaterialTotal, originalLaborTotal, originalTaskTotal, taskInput, taskTouched }[]`
+  - `contingencyPercentInput: string`
+- do not add derived totals, `hasInvalidInputs`, `contingencyRate`, or other render-only state back into the persisted snapshot unless there is a concrete restore bug that requires it
+
+Current editing rules on the result page:
+- `Task Total` is the only editable line-item field
+- `Material/Unit`, `Material Total`, and `Labor Total` remain read-only for untouched rows
+- once a row is edited (`taskTouched`), `Material/Unit`, `Material Total`, and `Labor Total` intentionally blank for that row because the material/labor split is no longer trusted
+- totals behavior is intentionally asymmetric:
+  - `Total Materials` and `Total Labor` blank when any edited rows exist
+  - `Subtotal` is recomputed from visible row task totals
+  - `Contingency` is recomputed from the current subtotal and the editable contingency percentage
+  - `Total Cost` is recomputed from `Subtotal + Contingency`
+- the contingency percentage is editable on the totals table, defaults to `10`, and is persisted in the structured snapshot
+- if any task-total input is invalid, dependent row values and recomputed totals blank until corrected
+- if the contingency percentage is invalid, keep `Subtotal` visible but blank `Contingency` and `Total Cost`
+
+Current task-total currency-input behavior:
+- the task-total input behaves like a currency field instead of a plain text input
+- while focused, the field keeps a visible leading `$`
+- while editing, the numeric portion is intentionally not forced into comma-separated/two-decimal display on every keystroke
+- when the field blurs:
+  - valid values normalize to standard currency formatting with two decimals, e.g. `$300.00`
+  - partially valid decimals normalize to two decimal places, e.g. `$300.50`
+  - blank/invalid input continues to use the existing validation flow instead of auto-filling `0.00`
+- if you need to change task-total UX again, inspect the local focused-input state and blur-format helpers in `src/routes/(app)/clara/result/+page.svelte` before changing parsing or persistence
+
+Current PDF export behavior:
+- the result page includes an `Export PDF` action in the sticky header alongside `Back to Clara` and `Open Chat`
+- PDF export is browser-only and uses frontend libraries already in the repo (`jspdf` + `html2canvas-pro`)
+- the export must download to the user’s machine via the browser; it must not persist a PDF inside Open WebUI, backend storage, or a container filesystem
+- the PDF is generated from an off-screen export-only DOM fragment, not from the visible app shell
+- the export uses the current interactive estimate state as the source of truth, so edited task totals and the current contingency percentage are reflected in the downloaded document
+- the PDF header currently includes:
+  - estimate title
+  - estimate/chat id (`savedChatId`)
+  - estimate creation timestamp (`claraEstimate.createdAt`, formatted in the browser locale/timezone)
+  - note title when available
+- if PDF export looks wrong, debug the hidden export DOM and client-side capture settings before adding backend PDF generation
+
+Important implementation/debugging notes for the result page:
+- `src/routes/(app)/clara/result/+page.svelte` now owns many responsibilities:
+  - bootstrap-vs-restore routing
+  - chat creation/persistence
+  - markdown normalization/parsing
+  - structured-estimate evaluation
+  - inline editing
+  - browser PDF export
+- keep changes narrow and prefer helpers over adding more duplicated branches inside handlers
+- script-side translation access should use the Svelte i18n store pattern already present on the page (`$i18n.t(...)` in reactive/script usage); avoid calling `i18n.t(...)` directly unless you verify the context object shape
+- the page has had prior runtime issues where the real estimate-generation error was swallowed; if generation fails generically, inspect the `generateOpenAIChatCompletion(...)` call path and the top-level `errorMessage` handling before suspecting the model/skill
+- inline estimate edits debounce snapshot saves; those debounced saves intentionally do not refetch the global chat list on each keystroke anymore
+- the hard cutover to Clara does not preserve old product-specific browser keys or old estimate metadata; Clara pages clear the replaced feature’s browser storage on entry
+- if restore behavior seems stale after edits, check:
+  - whether `persistCurrentEstimateSnapshot()` is still being called after debounced edits
+  - whether `structuredEstimate` is serialized without transient UI-only state
+  - whether `restoreEstimateFromChat(...)` rehydrates the structured snapshot before rendering
 
 Chat and note integration notes:
-- the regular chat composer can show a bottom-right `Estimate` action, but it is intentionally enabled only for the single globally latest estimate-backed chat, using `FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY`
-- notes use a separate note-scoped lookup via `FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY`, mapping `noteId -> latest estimate chat id for that note`
-- the note detail page (`src/lib/components/notes/NoteEditor.svelte`) now owns the primary estimate-return affordance for a note
+- the regular chat composer can show a bottom-right `Estimate` action, but it is intentionally enabled only for the single globally latest estimate-backed chat, using `CLARA_LATEST_ESTIMATE_CHAT_ID_KEY`
+- notes use a separate note-scoped lookup via `CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY`, mapping `noteId -> latest estimate chat id for that note`
+- the note detail page (`src/lib/components/notes/NoteEditor.svelte`) owns the primary estimate-return affordance for a note
 - the note header estimate button is adaptive:
   - `Last Estimate` when the current note body fingerprint matches the saved estimate snapshot for that note
   - `Compute Estimate` when the note body changed or no estimate exists yet
 - for this comparison, only note body content (`note.data.content.md`) matters; title/access-only edits should not flip the action to `Compute Estimate`
 - when `Compute Estimate` is launched from the note page, it must:
-  - set `field-boss-target-note-id` to the current note id first
-  - reuse the same model id, skill lookup, attachment shape, and bootstrap contract as Field Boss
-  - navigate through the normal Field Boss result flow rather than introducing a parallel estimate API
+  - set `clara-target-note-id` to the current note id first
+  - reuse the same model id, skill lookup, attachment shape, and bootstrap contract as Clara
+  - navigate through the normal Clara result flow rather than introducing a parallel estimate API
 
 When changing this feature:
 - keep the note attachment shape compatible with normal chat note attachments
@@ -347,14 +414,14 @@ When changing this feature:
   - selected model bootstrap
   - note + prompt + skill bootstrap
 - verify restore behavior separately from compute behavior:
-  - `/fieldboss/result` with session bootstrap
-  - `/fieldboss/result?chatId=...` with saved snapshot metadata
-- if the UI lands on an empty or broken result page, debug the bootstrap-vs-restore state split in `src/routes/(app)/fieldboss/result/+page.svelte` before changing the model selector flow
+  - `/clara/result` with session bootstrap
+  - `/clara/result?chatId=...` with saved snapshot metadata
+- if the UI lands on an empty or broken result page, debug the bootstrap-vs-restore state split in `src/routes/(app)/clara/result/+page.svelte` before changing the model selector flow
 - if a note-page estimate action behaves incorrectly, check three things before changing UI logic:
-  - whether the note-scoped chat id mapping in `FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY` is current
-  - whether the saved chat still contains valid `fieldBossEstimate` metadata
+  - whether the note-scoped chat id mapping in `CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY` is current
+  - whether the saved chat still contains valid `claraEstimate` metadata
   - whether the current note body fingerprint still matches the saved snapshot
-- keep Field Boss itself minimal; prefer putting note-specific estimate actions on the note page instead of adding more controls to the Field Boss recorder screen
+- keep Clara itself minimal; prefer putting note-specific estimate actions on the note page instead of adding more controls to the Clara recorder screen
 
 ### Sidebar / navigation features
 - Primary files:

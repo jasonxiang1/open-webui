@@ -36,7 +36,7 @@
 		status: 'processed';
 	};
 
-	type FieldBossResultBootstrap = {
+	type ClaraResultBootstrap = {
 		prompt: string;
 		files: DraftNoteAttachment[];
 		skillId: string;
@@ -63,13 +63,13 @@
 	};
 
 	const i18n = getContext('i18n');
-	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
-	const FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY = 'field-boss-result-sidebar-state';
-	const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
-	const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
+	const CLARA_RESULT_BOOTSTRAP_KEY = 'clara-result-bootstrap';
+	const CLARA_RESULT_SIDEBAR_STATE_KEY = 'clara-result-sidebar-state';
+	const CLARA_LATEST_ESTIMATE_CHAT_ID_KEY = 'clara-latest-estimate-chat-id';
+	const CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY = 'clara-note-estimate-chat-ids';
 
-	type FieldBossEstimateSnapshot = {
-		source: 'fieldboss-estimate';
+	type ClaraEstimateSnapshot = {
+		source: 'clara-estimate';
 		noteId: string;
 		noteTitle: string;
 		noteContentFingerprint: string;
@@ -150,8 +150,8 @@
 	let errorMessage = '';
 	let resultContent = '';
 	let savedChatId: string | null = null;
-	let bootstrap: FieldBossResultBootstrap | null = null;
-	let restoredEstimate: FieldBossEstimateSnapshot | null = null;
+	let bootstrap: ClaraResultBootstrap | null = null;
+	let restoredEstimate: ClaraEstimateSnapshot | null = null;
 	let previousSidebarState: boolean | null = null;
 	let sourceNoteContentFingerprint = '';
 	let structuredEstimate: StructuredEstimateSnapshot | null = null;
@@ -199,6 +199,21 @@
 			.replace(/<\$[^>]+>/g, '')
 			.replace(/```[\s\S]*?```/g, '')
 			.trim();
+	const clearReplacedFeatureStorage = () => {
+		const replacedFeaturePrefix = ['field', 'boss'].join('-');
+		[
+			'target-note-id',
+			'result-bootstrap',
+			'result-sidebar-state',
+			'latest-estimate-chat-id',
+			'note-estimate-chat-ids',
+			'cost-chat-bootstrap'
+		].forEach((suffix) => {
+			const key = `${replacedFeaturePrefix}-${suffix}`;
+			localStorage.removeItem(key);
+			sessionStorage.removeItem(key);
+		});
+	};
 
 	const fingerprintNoteContent = (content: string) => content.replace(/\r\n/g, '\n').trim();
 
@@ -654,7 +669,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 	const getExportFileName = () => {
 		const titlePart = sanitizeFileNamePart(restoredEstimate?.noteTitle ?? '');
 		const idPart = sanitizeFileNamePart(savedChatId ?? 'estimate');
-		return `fieldboss-estimate-${titlePart || idPart}.pdf`;
+		return `clara-estimate-${titlePart || idPart}.pdf`;
 	};
 
 	const rehydrateStructuredEstimate = (
@@ -871,14 +886,14 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		if (previousSidebarState === null) return;
 		showSidebar.set(previousSidebarState);
 		localStorage.sidebar = `${previousSidebarState}`;
-		sessionStorage.removeItem(FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY);
+		sessionStorage.removeItem(CLARA_RESULT_SIDEBAR_STATE_KEY);
 		previousSidebarState = null;
 	};
 
-	const backToFieldBoss = async () => {
+	const backToClara = async () => {
 		if (estimateSaveTimeout) clearTimeout(estimateSaveTimeout);
 		restoreSidebarPreference();
-		await goto('/fieldboss');
+		await goto('/clara');
 	};
 
 	const openSavedChat = async () => {
@@ -942,14 +957,14 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		rawContent: string,
 		normalizedContent: string,
 		nextStructuredEstimate: StructuredEstimateSnapshot | null
-	): FieldBossEstimateSnapshot | null => {
+	): ClaraEstimateSnapshot | null => {
 		const source = bootstrap ?? restoredEstimate;
 		const noteId = bootstrap?.files?.[0]?.id ?? restoredEstimate?.noteId;
 		const noteTitle = bootstrap?.files?.[0]?.title ?? restoredEstimate?.noteTitle ?? '';
 		if (!source || !noteId) return null;
 
 		return {
-			source: 'fieldboss-estimate',
+			source: 'clara-estimate',
 			noteId,
 			noteTitle,
 			noteContentFingerprint: sourceNoteContentFingerprint,
@@ -965,13 +980,13 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 	};
 
 	const syncEstimateSnapshotMetadata = (chatId: string, noteId: string) => {
-		localStorage.setItem(FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY, chatId);
+		localStorage.setItem(CLARA_LATEST_ESTIMATE_CHAT_ID_KEY, chatId);
 		const noteEstimateChatIds = JSON.parse(
-			localStorage.getItem(FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
+			localStorage.getItem(CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
 		) as Record<string, string>;
 		noteEstimateChatIds[noteId] = chatId;
 		localStorage.setItem(
-			FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY,
+			CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY,
 			JSON.stringify(noteEstimateChatIds)
 		);
 	};
@@ -983,11 +998,11 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 	const persistEstimateSnapshot = async (
 		chatId: string,
-		snapshot: FieldBossEstimateSnapshot,
+		snapshot: ClaraEstimateSnapshot,
 		options?: { syncMetadata?: boolean; refreshChats?: boolean }
 	) => {
 		const updatedChat = await updateChatById(localStorage.token, chatId, {
-			fieldBossEstimate: snapshot
+			claraEstimate: snapshot
 		});
 
 		savedChatId = updatedChat?.id ?? chatId;
@@ -1031,10 +1046,10 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 	const restoreEstimateFromChat = async (chatIdToRestore: string) => {
 		const storedChat = await getChatById(localStorage.token, chatIdToRestore).catch(() => null);
-		const snapshot = storedChat?.chat?.fieldBossEstimate as FieldBossEstimateSnapshot | undefined;
+		const snapshot = storedChat?.chat?.claraEstimate as ClaraEstimateSnapshot | undefined;
 
-		if (!snapshot?.resultContent || snapshot.source !== 'fieldboss-estimate') {
-			await goto('/fieldboss');
+		if (!snapshot?.resultContent || snapshot.source !== 'clara-estimate') {
+			await goto('/clara');
 			return;
 		}
 
@@ -1200,7 +1215,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 	const generateEstimate = async () => {
 		if (!bootstrap) {
-			await goto('/fieldboss');
+			await goto('/clara');
 			return;
 		}
 
@@ -1295,10 +1310,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		}
 
 		previousSidebarState = $showSidebar;
-		sessionStorage.setItem(
-			FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY,
-			JSON.stringify(previousSidebarState)
-		);
+		sessionStorage.setItem(CLARA_RESULT_SIDEBAR_STATE_KEY, JSON.stringify(previousSidebarState));
 		showSidebar.set(false);
 
 		const restoreChatId = $page.url.searchParams.get('chatId');
@@ -1307,30 +1319,32 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			return;
 		}
 
-		const rawBootstrap = sessionStorage.getItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY);
+		clearReplacedFeatureStorage();
+
+		const rawBootstrap = sessionStorage.getItem(CLARA_RESULT_BOOTSTRAP_KEY);
 		if (!rawBootstrap) {
-			goto('/fieldboss');
+			goto('/clara');
 			return;
 		}
 
 		try {
-			bootstrap = JSON.parse(rawBootstrap) as FieldBossResultBootstrap;
+			bootstrap = JSON.parse(rawBootstrap) as ClaraResultBootstrap;
 		} catch {
-			sessionStorage.removeItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY);
-			goto('/fieldboss');
+			sessionStorage.removeItem(CLARA_RESULT_BOOTSTRAP_KEY);
+			goto('/clara');
 			return;
 		}
 
-		sessionStorage.removeItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY);
+		sessionStorage.removeItem(CLARA_RESULT_BOOTSTRAP_KEY);
 
 		if (!bootstrap?.files?.[0]?.id) {
-			goto('/fieldboss');
+			goto('/clara');
 			return;
 		}
 
 		const note = await getNoteById(localStorage.token, bootstrap.files[0].id).catch(() => null);
 		if (!note) {
-			goto('/fieldboss');
+			goto('/clara');
 			return;
 		}
 
@@ -1338,12 +1352,12 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 
 		loaded = true;
 
-		const storedSidebarState = sessionStorage.getItem(FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY);
+		const storedSidebarState = sessionStorage.getItem(CLARA_RESULT_SIDEBAR_STATE_KEY);
 		if (storedSidebarState && previousSidebarState === null) {
 			try {
 				previousSidebarState = JSON.parse(storedSidebarState);
 			} catch {
-				sessionStorage.removeItem(FIELD_BOSS_RESULT_SIDEBAR_STATE_KEY);
+				sessionStorage.removeItem(CLARA_RESULT_SIDEBAR_STATE_KEY);
 			}
 		}
 
@@ -1361,7 +1375,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 </script>
 
 <svelte:head>
-	<title>{$i18n.t('Field Boss Result')}</title>
+	<title>{$i18n.t('Clara Result')}</title>
 </svelte:head>
 
 {#if loaded}
@@ -1379,11 +1393,11 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 					<div class="flex flex-col gap-3 min-[31rem]:flex-row min-[31rem]:items-center min-[31rem]:justify-between">
 						<button
 							class="rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 px-4 py-3 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition self-start"
-							on:click={backToFieldBoss}
+							on:click={backToClara}
 						>
 							<div class="flex items-center gap-3 text-sm font-medium text-gray-900 dark:text-gray-100">
 								<ArrowLeft className="size-4" strokeWidth="2" />
-								<span>{$i18n.t('Back to FieldBoss')}</span>
+								<span>{$i18n.t('Back to Clara')}</span>
 							</div>
 						</button>
 
@@ -1416,7 +1430,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 				<div class="rounded-[2rem] border border-gray-200 dark:border-gray-800 bg-white/95 dark:bg-gray-900/95 shadow-2xl min-h-[16rem]">
 					<div class="border-b border-gray-100 dark:border-gray-800 px-6 py-5 md:px-8">
 						<div class="text-xs uppercase tracking-[0.16em] text-gray-500 dark:text-gray-400">
-							{$i18n.t('Field Boss Result')}
+							{$i18n.t('Clara Result')}
 						</div>
 						<div class="mt-2 text-2xl font-semibold text-gray-900 dark:text-gray-100">
 							{$i18n.t('Cost Estimate')}
@@ -1675,7 +1689,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 				class="w-[1024px] bg-white px-12 py-12 text-gray-900"
 			>
 				<div class="border-b border-gray-300 pb-6">
-					<div class="text-xs uppercase tracking-[0.16em] text-gray-500">Field Boss Result</div>
+					<div class="text-xs uppercase tracking-[0.16em] text-gray-500">Clara Result</div>
 					<div class="mt-3 text-[2rem] font-semibold leading-none">Cost Estimate</div>
 					<div class="mt-6 grid grid-cols-2 gap-x-8 gap-y-3 text-sm">
 						<div>

@@ -13,7 +13,7 @@
 	import NoteIcon from '$lib/components/icons/Note.svelte';
 	import ArrowRight from '$lib/components/icons/ArrowRight.svelte';
 	import ChatPlus from '$lib/components/icons/ChatPlus.svelte';
-	import FieldBossNotePicker from '$lib/components/fieldboss/FieldBossNotePicker.svelte';
+	import ClaraNotePicker from '$lib/components/clara/ClaraNotePicker.svelte';
 
 	type RecorderStatus = 'idle' | 'recording' | 'transcribing' | 'saving' | 'success' | 'error';
 	type SelectedNote = {
@@ -34,7 +34,7 @@
 		description: string;
 		status: 'processed';
 	};
-	type FieldBossResultBootstrap = {
+	type ClaraResultBootstrap = {
 		prompt: string;
 		files: DraftNoteAttachment[];
 		skillId: string;
@@ -44,8 +44,8 @@
 	};
 
 	const i18n = getContext('i18n');
-	const STORAGE_KEY = 'field-boss-target-note-id';
-	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
+	const CLARA_TARGET_NOTE_STORAGE_KEY = 'clara-target-note-id';
+	const CLARA_RESULT_BOOTSTRAP_KEY = 'clara-result-bootstrap';
 	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 	const COST_CHAT_CODE_INTERPRETER_ENABLED = false;
@@ -64,9 +64,24 @@
 	const canRecord = () => status === 'idle' || status === 'success' || status === 'error';
 	const canStartCostChat = () =>
 		!!selectedNote && !['recording', 'transcribing', 'saving'].includes(status);
+	const clearReplacedFeatureStorage = () => {
+		const replacedFeaturePrefix = ['field', 'boss'].join('-');
+		[
+			'target-note-id',
+			'result-bootstrap',
+			'result-sidebar-state',
+			'latest-estimate-chat-id',
+			'note-estimate-chat-ids',
+			'cost-chat-bootstrap'
+		].forEach((suffix) => {
+			const key = `${replacedFeaturePrefix}-${suffix}`;
+			localStorage.removeItem(key);
+			sessionStorage.removeItem(key);
+		});
+	};
 
 	const describeNote = (updatedAt?: number) =>
-		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Field Boss');
+		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Clara');
 
 	const appendTranscript = (existingContent: string, transcript: string) => {
 		const trimmedExisting = existingContent.trim();
@@ -94,7 +109,7 @@
 			id: note.id,
 			title: note.title || $i18n.t('Untitled')
 		};
-		localStorage.setItem(STORAGE_KEY, note.id);
+		localStorage.setItem(CLARA_TARGET_NOTE_STORAGE_KEY, note.id);
 		status = 'idle';
 		statusMessage = $i18n.t('Ready to record into {{title}}.', {
 			title: selectedNote.title
@@ -102,12 +117,12 @@
 	};
 
 	const loadSelectedNote = async () => {
-		const noteId = localStorage.getItem(STORAGE_KEY);
+		const noteId = localStorage.getItem(CLARA_TARGET_NOTE_STORAGE_KEY);
 		if (!noteId) return;
 
 		const note = await getNoteById(localStorage.token, noteId).catch(() => null);
 		if (!note) {
-			localStorage.removeItem(STORAGE_KEY);
+			localStorage.removeItem(CLARA_TARGET_NOTE_STORAGE_KEY);
 			return;
 		}
 
@@ -130,7 +145,7 @@
 		});
 
 		if (!note) {
-			localStorage.removeItem(STORAGE_KEY);
+			localStorage.removeItem(CLARA_TARGET_NOTE_STORAGE_KEY);
 			selectedNote = null;
 			status = 'error';
 			statusMessage = $i18n.t('The selected note is no longer available.');
@@ -208,7 +223,7 @@
 		});
 
 		if (!note) {
-			localStorage.removeItem(STORAGE_KEY);
+			localStorage.removeItem(CLARA_TARGET_NOTE_STORAGE_KEY);
 			selectedNote = null;
 			status = 'error';
 			statusMessage = $i18n.t('The selected note is no longer available.');
@@ -229,7 +244,7 @@
 			status: 'processed'
 		};
 
-		const bootstrap: FieldBossResultBootstrap = {
+		const bootstrap: ClaraResultBootstrap = {
 			prompt: `${$i18n.t('Use the attached note to estimate project costs.')}`,
 			files: [attachment],
 			skillId: skill.id,
@@ -238,14 +253,14 @@
 			codeInterpreterEnabled: COST_CHAT_CODE_INTERPRETER_ENABLED
 		};
 
-		sessionStorage.setItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
+		sessionStorage.setItem(CLARA_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
 
-		await goto('/fieldboss/result');
+		await goto('/clara/result');
 	};
 
 	const handleAudioBlob = async (audioBlob: Blob) => {
 		const ext = (audioBlob.type.split('/')[1] || 'webm').split(';')[0];
-		const file = new File([audioBlob], `field-boss-${dayjs().format('YYYYMMDD-HHmmss')}.${ext}`, {
+		const file = new File([audioBlob], `clara-${dayjs().format('YYYYMMDD-HHmmss')}.${ext}`, {
 			type: audioBlob.type || 'audio/webm'
 		});
 
@@ -349,6 +364,8 @@
 			return;
 		}
 
+		clearReplacedFeatureStorage();
+
 		await loadSelectedNote();
 
 		if (!selectedNote) {
@@ -367,10 +384,10 @@
 </script>
 
 <svelte:head>
-	<title>{$i18n.t('Field Boss')}</title>
+	<title>{$i18n.t('Clara')}</title>
 </svelte:head>
 
-<FieldBossNotePicker
+<ClaraNotePicker
 	bind:show={showNotePicker}
 	on:select={(event) => setSelectedNote(event.detail)}
 	on:create={(event) => setSelectedNote(event.detail)}

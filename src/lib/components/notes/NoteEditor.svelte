@@ -101,9 +101,9 @@
 
 	export let id: null | string = null;
 
-	const FIELD_BOSS_TARGET_NOTE_STORAGE_KEY = 'field-boss-target-note-id';
-	const FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY = 'field-boss-note-estimate-chat-ids';
-	const FIELD_BOSS_RESULT_BOOTSTRAP_KEY = 'field-boss-result-bootstrap';
+	const CLARA_TARGET_NOTE_STORAGE_KEY = 'clara-target-note-id';
+	const CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY = 'clara-note-estimate-chat-ids';
+	const CLARA_RESULT_BOOTSTRAP_KEY = 'clara-result-bootstrap';
 	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 	const COST_CHAT_CODE_INTERPRETER_ENABLED = false;
@@ -124,7 +124,7 @@
 		status: 'processed';
 	};
 
-	type FieldBossResultBootstrap = {
+	type ClaraResultBootstrap = {
 		prompt: string;
 		files: DraftNoteAttachment[];
 		skillId: string;
@@ -133,8 +133,8 @@
 		codeInterpreterEnabled: boolean;
 	};
 
-	type FieldBossEstimateSnapshot = {
-		source: 'fieldboss-estimate';
+	type ClaraEstimateSnapshot = {
+		source: 'clara-estimate';
 		noteId: string;
 		noteTitle: string;
 		noteContentFingerprint: string;
@@ -210,21 +210,21 @@
 
 	let inputElement = null;
 	let lastEstimateChatIdForNote: string | null = null;
-	let latestEstimateSnapshotForNote: FieldBossEstimateSnapshot | null = null;
+	let latestEstimateSnapshotForNote: ClaraEstimateSnapshot | null = null;
 
 	// Computed HTML for editor: fall back to markdown if HTML is missing
 	$: editorHtml =
 		note?.data?.content?.html ||
 		(note?.data?.content?.md ? marked.parse(note.data.content.md) : '');
 
-	$: canOpenFieldBoss =
+	$: canOpenClara =
 		($config?.features?.enable_notes ?? false) &&
 		($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true));
 	$: lastEstimateChatIdForNote =
 		typeof localStorage !== 'undefined' && note?.id
 		? (
 				JSON.parse(
-					localStorage.getItem(FIELD_BOSS_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
+					localStorage.getItem(CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
 				) as Record<string, string>
 			)[note.id] ?? null
 		: null;
@@ -237,7 +237,7 @@
 
 	const fingerprintNoteContent = (content: string) => content.replace(/\r\n/g, '\n').trim();
 	const describeNote = (updatedAt?: number) =>
-		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Field Boss');
+		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Clara');
 
 	const loadLatestEstimateSnapshotForNote = async () => {
 		if (!lastEstimateChatIdForNote || !note?.id) {
@@ -246,9 +246,9 @@
 		}
 
 		const chat = await getChatById(localStorage.token, lastEstimateChatIdForNote).catch(() => null);
-		const snapshot = chat?.chat?.fieldBossEstimate as FieldBossEstimateSnapshot | undefined;
+		const snapshot = chat?.chat?.claraEstimate as ClaraEstimateSnapshot | undefined;
 		latestEstimateSnapshotForNote =
-			snapshot?.source === 'fieldboss-estimate' && snapshot?.noteId === note.id ? snapshot : null;
+			snapshot?.source === 'clara-estimate' && snapshot?.noteId === note.id ? snapshot : null;
 	};
 
 	$: if (note?.id) {
@@ -711,11 +711,11 @@ ${content}
 		}
 	};
 
-	const openInFieldBoss = async () => {
+	const openInClara = async () => {
 		if (!note?.id) return;
 
-		localStorage.setItem(FIELD_BOSS_TARGET_NOTE_STORAGE_KEY, note.id);
-		await goto('/fieldboss');
+		localStorage.setItem(CLARA_TARGET_NOTE_STORAGE_KEY, note.id);
+		await goto('/clara');
 	};
 
 	const resolveCostEstimateSkill = async () => {
@@ -739,7 +739,7 @@ ${content}
 
 	const openLastEstimate = async () => {
 		if (!lastEstimateChatIdForNote) return;
-		await goto(`/fieldboss/result?chatId=${lastEstimateChatIdForNote}`);
+		await goto(`/clara/result?chatId=${lastEstimateChatIdForNote}`);
 	};
 
 	const computeEstimateFromNote = async () => {
@@ -772,7 +772,7 @@ ${content}
 			status: 'processed'
 		};
 
-		const bootstrap: FieldBossResultBootstrap = {
+		const bootstrap: ClaraResultBootstrap = {
 			prompt: `${$i18n.t('Use the attached note to estimate project costs.')}`,
 			files: [attachment],
 			skillId: skill.id,
@@ -781,9 +781,9 @@ ${content}
 			codeInterpreterEnabled: COST_CHAT_CODE_INTERPRETER_ENABLED
 		};
 
-		localStorage.setItem(FIELD_BOSS_TARGET_NOTE_STORAGE_KEY, note.id);
-		sessionStorage.setItem(FIELD_BOSS_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
-		await goto('/fieldboss/result');
+		localStorage.setItem(CLARA_TARGET_NOTE_STORAGE_KEY, note.id);
+		sessionStorage.setItem(CLARA_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
+		await goto('/clara/result');
 	};
 
 	const handleEstimateAction = async () => {
@@ -1269,13 +1269,13 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 								</NoteMenu>
 
 								{#if note?.write_access}
-									{#if canOpenFieldBoss}
+									{#if canOpenClara}
 										<button
 											class="shrink-0 bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm"
-											on:click={openInFieldBoss}
+											on:click={openInClara}
 										>
 											<Mic className="size-3.5" strokeWidth="2" />
-											{$i18n.t('Field Boss')}
+											{$i18n.t('Clara')}
 										</button>
 									{/if}
 

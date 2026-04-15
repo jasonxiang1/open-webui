@@ -48,7 +48,7 @@
 		if (creating) return;
 
 		creating = true;
-		const title = newNoteTitle.trim() || $i18n.t('Field Boss Note');
+		const title = newNoteTitle.trim() || $i18n.t('Clara Note');
 		const note = await createNewNote(localStorage.token, {
 			title,
 			data: {
@@ -96,16 +96,16 @@
 		</div>
 
 		<div class="p-5 border-b border-gray-100 dark:border-gray-800 space-y-3">
-			<label class="block text-sm text-gray-600 dark:text-gray-300" for="field-boss-note-title">
+			<label class="block text-sm text-gray-600 dark:text-gray-300" for="clara-note-title">
 				{$i18n.t('Create Note')}
 			</label>
 			<div class="flex gap-2">
 				<input
-					id="field-boss-note-title"
+					id="clara-note-title"
 					class="flex-1 rounded-2xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 px-4 py-3 text-sm outline-none focus:border-gray-400 dark:focus:border-gray-600"
 					type="text"
 					bind:value={newNoteTitle}
-					placeholder={$i18n.t('Field Boss')}
+					placeholder={$i18n.t('Clara')}
 					on:keydown={(event) => {
 						if (event.key === 'Enter') {
 							createNote();

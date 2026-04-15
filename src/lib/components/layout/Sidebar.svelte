@@ -792,19 +792,19 @@
 					</div>
 
 					<div class="">
-						<Tooltip content={$i18n.t('Field Boss')} placement="right">
+						<Tooltip content={$i18n.t('Clara')} placement="right">
 							<a
 								class=" cursor-pointer flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition group"
-								href="/fieldboss"
+								href="/clara"
 								on:click={async (e) => {
 									e.stopImmediatePropagation();
 									e.preventDefault();
 
-									goto('/fieldboss');
+									goto('/clara');
 									itemClickHandler();
 								}}
 								draggable="false"
-								aria-label={$i18n.t('Field Boss')}
+								aria-label={$i18n.t('Clara')}
 							>
 								<div class=" self-center flex items-center justify-center size-9">
 									<Mic className="size-4.5" strokeWidth="2" />
@@ -1046,19 +1046,19 @@
 
 						<div class="px-[0.4375rem] flex justify-center text-gray-800 dark:text-gray-200">
 							<a
-								id="sidebar-field-boss-button"
+								id="sidebar-clara-button"
 								class="grow flex items-center space-x-3 rounded-2xl px-2.5 py-2 hover:bg-gray-100 dark:hover:bg-gray-900 transition"
-								href="/fieldboss"
+								href="/clara"
 								on:click={itemClickHandler}
 								draggable="false"
-								aria-label={$i18n.t('Field Boss')}
+								aria-label={$i18n.t('Clara')}
 							>
 								<div class="self-center">
 									<Mic className="size-4.5" strokeWidth="2" />
 								</div>
 
 								<div class="flex self-center translate-y-[0.5px]">
-									<div class=" self-center text-sm font-primary">{$i18n.t('Field Boss')}</div>
+									<div class=" self-center text-sm font-primary">{$i18n.t('Clara')}</div>
 								</div>
 							</a>
 						</div>

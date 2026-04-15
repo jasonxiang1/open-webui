@@ -109,8 +109,8 @@
 	import { getBanners } from '$lib/apis/configs';
 
 	export let chatIdProp = '';
-	const FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY = 'field-boss-cost-chat-bootstrap';
-	const FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY = 'field-boss-latest-estimate-chat-id';
+	const CLARA_COST_CHAT_BOOTSTRAP_KEY = 'clara-cost-chat-bootstrap';
+	const CLARA_LATEST_ESTIMATE_CHAT_ID_KEY = 'clara-latest-estimate-chat-id';
 
 	type BackToEstimateState = {
 		enabled: boolean;
@@ -194,13 +194,13 @@
 	let params = {};
 
 	const updateBackToEstimateState = () => {
-		const estimateSnapshot = chat?.chat?.fieldBossEstimate;
-		const latestEstimateChatId = localStorage.getItem(FIELD_BOSS_LATEST_ESTIMATE_CHAT_ID_KEY);
+		const estimateSnapshot = chat?.chat?.claraEstimate;
+		const latestEstimateChatId = localStorage.getItem(CLARA_LATEST_ESTIMATE_CHAT_ID_KEY);
 
 		backToEstimate = {
 			enabled:
 				!!chat?.id &&
-				estimateSnapshot?.source === 'fieldboss-estimate' &&
+				estimateSnapshot?.source === 'clara-estimate' &&
 				latestEstimateChatId === chat.id,
 			chatId: chat?.id ?? null
 		};
@@ -208,7 +208,7 @@
 
 	const openBackToEstimate = async () => {
 		if (!backToEstimate.enabled || !backToEstimate.chatId) return;
-		await goto(`/fieldboss/result?chatId=${backToEstimate.chatId}`);
+		await goto(`/clara/result?chatId=${backToEstimate.chatId}`);
 	};
 
 	$: if (chatIdProp) {
@@ -1263,11 +1263,11 @@
 			}
 		}
 
-		const fieldBossBootstrap = sessionStorage.getItem(FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY);
-		if (fieldBossBootstrap) {
+		const claraBootstrap = sessionStorage.getItem(CLARA_COST_CHAT_BOOTSTRAP_KEY);
+		if (claraBootstrap) {
 			try {
-				const bootstrap = JSON.parse(fieldBossBootstrap) as ChatDraft;
-				sessionStorage.removeItem(FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY);
+				const bootstrap = JSON.parse(claraBootstrap) as ChatDraft;
+				sessionStorage.removeItem(CLARA_COST_CHAT_BOOTSTRAP_KEY);
 
 				const draftPrompt = bootstrap.prompt ?? '';
 				files = bootstrap.files ?? [];
@@ -1283,8 +1283,8 @@
 					await submitPrompt(draftPrompt);
 				}
 			} catch (e) {
-				sessionStorage.removeItem(FIELD_BOSS_COST_CHAT_BOOTSTRAP_KEY);
-				console.error('Failed to restore Field Boss cost chat bootstrap', e);
+				sessionStorage.removeItem(CLARA_COST_CHAT_BOOTSTRAP_KEY);
+				console.error('Failed to restore Clara cost chat bootstrap', e);
 			}
 		}
 
