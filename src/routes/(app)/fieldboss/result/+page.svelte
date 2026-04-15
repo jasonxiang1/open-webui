@@ -12,6 +12,7 @@
 	import ContentRenderer from '$lib/components/chat/Messages/ContentRenderer.svelte';
 	import ArrowLeft from '$lib/components/icons/ArrowLeft.svelte';
 	import ChatPlus from '$lib/components/icons/ChatPlus.svelte';
+	import Download from '$lib/components/icons/Download.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import {
 		chats,
@@ -127,6 +128,7 @@
 		materialTotalDisplay: string;
 		laborDisplay: string;
 		taskInput: string;
+		taskDisplayValue: string;
 		taskError: string;
 		taskValue: number | null;
 		isModified: boolean;
@@ -154,6 +156,9 @@
 	let sourceNoteContentFingerprint = '';
 	let structuredEstimate: StructuredEstimateSnapshot | null = null;
 	let estimateSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+	let exportPdfNode: HTMLDivElement | null = null;
+	let exportingPdf = false;
+	let activeTaskTotalInputs: Record<string, string> = {};
 
 	const responseMessageId = uuidv4();
 	const history = {
@@ -163,7 +168,11 @@
 
 	$: activeModelId = bootstrap?.modelId ?? restoredEstimate?.modelId ?? '';
 	$: selectedModel = $models.find((item) => item.id === activeModelId) ?? null;
-	$: evaluatedEstimate = structuredEstimate ? evaluateStructuredEstimate(structuredEstimate) : null;
+	$: evaluatedEstimate = structuredEstimate
+		? evaluateStructuredEstimate(structuredEstimate, activeTaskTotalInputs)
+		: null;
+	$: estimateCreatedAt = restoredEstimate?.createdAt ?? null;
+	$: exportTimestampDisplay = formatEstimateTimestamp(estimateCreatedAt);
 	$: rendererHistory =
 		resultContent || errorMessage
 			? {
@@ -506,6 +515,10 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		}
 
 		const normalized = trimmed.replace(/\$/g, '').replace(/,/g, '').replace(/\s+/g, '');
+		if (!normalized) {
+			return { state: 'blank', value: null };
+		}
+
 		if (!/^-?(?:\d+(?:\.\d{0,2})?|\d+\.)$/.test(normalized)) {
 			return { state: 'invalid', value: null };
 		}
@@ -543,6 +556,38 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		if (/^0$/.test(trimmed)) return '0';
 		if (/^0+\d+$/.test(trimmed)) return `${Number.parseInt(trimmed, 10)}`;
 		return trimmed;
+	};
+
+	const normalizeCurrencyInputForEditing = (value: string) => {
+		const normalized = value.replace(/\$/g, '').replace(/,/g, '').replace(/^\s+/, '');
+		return normalized ? `$${normalized}` : '$';
+	};
+
+	const getEditingCurrencyDisplayValue = (value: string) => {
+		const parsed = parseCurrencyInput(value);
+		if (parsed.state !== 'valid') {
+			return normalizeCurrencyInputForEditing(value);
+		}
+
+		const normalized = value
+			.trim()
+			.replace(/\$/g, '')
+			.replace(/,/g, '')
+			.replace(/\s+/g, '')
+			.replace(/(\.\d*?[1-9])0+$/u, '$1')
+			.replace(/\.0+$/u, '')
+			.replace(/\.$/u, '');
+
+		return normalized ? `$${normalized}` : '$';
+	};
+
+	const formatCurrencyInputOnBlur = (value: string) => {
+		const parsed = parseCurrencyInput(value);
+		if (parsed.state !== 'valid' || parsed.value === null) {
+			return normalizeCurrencyInputForEditing(value);
+		}
+
+		return formatCurrency(roundCurrency(parsed.value));
 	};
 
 	const getErrorMessage = (error: unknown, fallback: string) => {
@@ -583,6 +628,33 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		}
 
 		return fallback;
+	};
+
+	const formatEstimateTimestamp = (timestamp: number | null) => {
+		if (!timestamp) return '';
+
+		try {
+			return new Intl.DateTimeFormat(undefined, {
+				dateStyle: 'medium',
+				timeStyle: 'short'
+			}).format(new Date(timestamp));
+		} catch {
+			return new Date(timestamp).toLocaleString();
+		}
+	};
+
+	const sanitizeFileNamePart = (value: string) =>
+		value
+			.trim()
+			.replace(/[\\/:*?"<>|]+/g, '-')
+			.replace(/\s+/g, '-')
+			.replace(/-+/g, '-')
+			.replace(/^-|-$/g, '');
+
+	const getExportFileName = () => {
+		const titlePart = sanitizeFileNamePart(restoredEstimate?.noteTitle ?? '');
+		const idPart = sanitizeFileNamePart(savedChatId ?? 'estimate');
+		return `fieldboss-estimate-${titlePart || idPart}.pdf`;
 	};
 
 	const rehydrateStructuredEstimate = (
@@ -669,7 +741,8 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 	const isLineItemModified = (lineItem: StructuredEstimateLineItem) => lineItem.taskTouched;
 
 	const evaluateStructuredEstimate = (
-		estimate: StructuredEstimateSnapshot
+		estimate: StructuredEstimateSnapshot,
+		taskInputOverrides: Record<string, string>
 	): EvaluatedEstimate => {
 		const lineItems = estimate.lineItems.map((lineItem) => {
 			const isModified = isLineItemModified(lineItem);
@@ -695,6 +768,7 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 				materialTotalDisplay: isModified || isInvalid ? '' : lineItem.originalMaterialTotal,
 				laborDisplay: isModified || isInvalid ? '' : lineItem.originalLaborTotal,
 				taskInput: lineItem.taskInput,
+				taskDisplayValue: taskInputOverrides[lineItem.id] ?? lineItem.taskInput,
 				taskError,
 				taskValue,
 				isModified,
@@ -812,6 +886,56 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 		if (estimateSaveTimeout) clearTimeout(estimateSaveTimeout);
 		restoreSidebarPreference();
 		await goto(`/c/${savedChatId}`);
+	};
+
+	const exportEstimateAsPdf = async () => {
+		if (!evaluatedEstimate || !exportPdfNode || !savedChatId || exportingPdf) return;
+
+		exportingPdf = true;
+
+		try {
+			await tick();
+
+			const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+				import('jspdf'),
+				import('html2canvas-pro')
+			]);
+
+			const canvas = await html2canvas(exportPdfNode, {
+				useCORS: true,
+				backgroundColor: '#ffffff',
+				scale: 2,
+				width: exportPdfNode.scrollWidth,
+				windowWidth: exportPdfNode.scrollWidth,
+				windowHeight: exportPdfNode.scrollHeight
+			});
+
+			const imgData = canvas.toDataURL('image/jpeg', 0.92);
+			const pdf = new jsPDF('p', 'mm', 'a4');
+			const pageWidthMM = 210;
+			const pageHeightMM = 297;
+			const imgWidthMM = pageWidthMM;
+			const imgHeightMM = (canvas.height * imgWidthMM) / canvas.width;
+			let heightLeftMM = imgHeightMM;
+			let positionMM = 0;
+
+			pdf.addImage(imgData, 'JPEG', 0, positionMM, imgWidthMM, imgHeightMM);
+			heightLeftMM -= pageHeightMM;
+
+			while (heightLeftMM > 0) {
+				positionMM -= pageHeightMM;
+				pdf.addPage();
+				pdf.addImage(imgData, 'JPEG', 0, positionMM, imgWidthMM, imgHeightMM);
+				heightLeftMM -= pageHeightMM;
+			}
+
+			pdf.save(getExportFileName());
+		} catch (error) {
+			console.error(error);
+			toast.error(getErrorMessage(error, $i18n.t('Failed to export PDF.')));
+		} finally {
+			exportingPdf = false;
+		}
 	};
 
 	const getEstimateSnapshot = (
@@ -1001,13 +1125,59 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 	const handleEditableLineItemInput = (lineItemId: string, value: string) => {
 		if (!structuredEstimate) return;
 
+		const nextTaskInput = normalizeCurrencyInputForEditing(value);
+		activeTaskTotalInputs = {
+			...activeTaskTotalInputs,
+			[lineItemId]: nextTaskInput
+		};
+
 		structuredEstimate = {
 			...structuredEstimate,
 			lineItems: structuredEstimate.lineItems.map((lineItem) =>
 				lineItem.id === lineItemId
 					? {
 							...lineItem,
-							taskInput: value,
+							taskInput: nextTaskInput,
+							taskTouched: true
+						}
+					: lineItem
+			)
+		};
+
+		scheduleEstimateSnapshotSave();
+	};
+
+	const handleEditableLineItemFocus = (lineItemId: string) => {
+		if (!structuredEstimate) return;
+
+		const lineItem = structuredEstimate.lineItems.find((item) => item.id === lineItemId);
+		if (!lineItem) return;
+
+		activeTaskTotalInputs = {
+			...activeTaskTotalInputs,
+			[lineItemId]: getEditingCurrencyDisplayValue(lineItem.taskInput)
+		};
+	};
+
+	const handleEditableLineItemBlur = (lineItemId: string) => {
+		if (!structuredEstimate) return;
+
+		const currentTaskInput =
+			activeTaskTotalInputs[lineItemId] ??
+			structuredEstimate.lineItems.find((item) => item.id === lineItemId)?.taskInput ??
+			'';
+		const nextTaskInput = formatCurrencyInputOnBlur(currentTaskInput);
+		const remainingTaskInputs = { ...activeTaskTotalInputs };
+		delete remainingTaskInputs[lineItemId];
+		activeTaskTotalInputs = remainingTaskInputs;
+
+		structuredEstimate = {
+			...structuredEstimate,
+			lineItems: structuredEstimate.lineItems.map((lineItem) =>
+				lineItem.id === lineItemId
+					? {
+							...lineItem,
+							taskInput: nextTaskInput,
 							taskTouched: true
 						}
 					: lineItem
@@ -1217,16 +1387,29 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 							</div>
 						</button>
 
-						<button
-							class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 self-start min-[31rem]:self-auto"
-							on:click={openSavedChat}
-							disabled={!savedChatId}
-						>
-							<div class="flex items-center gap-3 text-sm font-medium">
-								<ChatPlus className="size-4.5" />
-								<span>{$i18n.t('Open Chat')}</span>
-							</div>
-						</button>
+						<div class="flex flex-col gap-3 self-start min-[31rem]:flex-row min-[31rem]:items-center min-[31rem]:self-auto">
+							<button
+								class="rounded-2xl border border-gray-200 bg-white px-4 py-3 text-gray-900 shadow-lg transition hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-800 dark:bg-gray-900 dark:text-gray-100 dark:hover:bg-gray-850 self-start min-[31rem]:self-auto"
+								on:click={exportEstimateAsPdf}
+								disabled={!evaluatedEstimate || !savedChatId || generating || exportingPdf}
+							>
+								<div class="flex items-center gap-3 text-sm font-medium">
+									<Download className="size-4" strokeWidth="2" />
+									<span>{exportingPdf ? $i18n.t('Exporting PDF...') : $i18n.t('Export PDF')}</span>
+								</div>
+							</button>
+
+							<button
+								class="rounded-2xl bg-gray-900 text-white dark:bg-white dark:text-gray-900 px-4 py-3 shadow-lg transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 self-start min-[31rem]:self-auto"
+								on:click={openSavedChat}
+								disabled={!savedChatId}
+							>
+								<div class="flex items-center gap-3 text-sm font-medium">
+									<ChatPlus className="size-4.5" />
+									<span>{$i18n.t('Open Chat')}</span>
+								</div>
+							</button>
+						</div>
 					</div>
 				</div>
 
@@ -1346,12 +1529,14 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 																class="w-full min-w-[7rem] rounded-xl border bg-white px-2.5 py-2 text-base text-gray-900 outline-none transition md:min-w-0 dark:bg-gray-950 dark:text-gray-100 {lineItem.taskError
 																	? 'border-red-400 focus:border-red-500'
 																	: 'border-gray-200 focus:border-gray-400 dark:border-gray-800 dark:focus:border-gray-600'}"
-																value={lineItem.taskInput}
+																value={lineItem.taskDisplayValue}
+																on:focus={() => handleEditableLineItemFocus(lineItem.id)}
 																on:input={(event) =>
 																	handleEditableLineItemInput(
 																		lineItem.id,
 																		(event.currentTarget as HTMLInputElement).value
 																	)}
+																on:blur={() => handleEditableLineItemBlur(lineItem.id)}
 															/>
 															{#if lineItem.taskError}
 																<div class="mt-1 text-xs text-red-500 dark:text-red-400">
@@ -1482,4 +1667,143 @@ Use currency formatting like $1,234.56. Use — for missing values. Do not repla
 			</div>
 		</div>
 	</div>
+
+	{#if evaluatedEstimate}
+		<div class="pointer-events-none fixed -left-[10000px] top-0 opacity-0" aria-hidden="true">
+			<div
+				bind:this={exportPdfNode}
+				class="w-[1024px] bg-white px-12 py-12 text-gray-900"
+			>
+				<div class="border-b border-gray-300 pb-6">
+					<div class="text-xs uppercase tracking-[0.16em] text-gray-500">Field Boss Result</div>
+					<div class="mt-3 text-[2rem] font-semibold leading-none">Cost Estimate</div>
+					<div class="mt-6 grid grid-cols-2 gap-x-8 gap-y-3 text-sm">
+						<div>
+							<div class="font-semibold text-gray-500">Estimate ID</div>
+							<div class="mt-1 text-gray-900">{savedChatId ?? '—'}</div>
+						</div>
+						<div>
+							<div class="font-semibold text-gray-500">Created</div>
+							<div class="mt-1 text-gray-900">{exportTimestampDisplay || '—'}</div>
+						</div>
+						{#if restoredEstimate?.noteTitle}
+							<div class="col-span-2">
+								<div class="font-semibold text-gray-500">Note</div>
+								<div class="mt-1 text-gray-900">{restoredEstimate.noteTitle}</div>
+							</div>
+						{/if}
+					</div>
+				</div>
+
+				<div class="mt-8 space-y-8">
+					{#if evaluatedEstimate.excludedItems.length > 0}
+						<div>
+							<div class="mb-3 text-xl font-semibold">Excluded Items</div>
+							<table class="w-full border-collapse text-left text-sm">
+								<thead>
+									<tr class="bg-gray-100 text-gray-700">
+										<th class="border border-gray-300 px-3 py-2 font-semibold">Item</th>
+										<th class="border border-gray-300 px-3 py-2 font-semibold">Reason</th>
+									</tr>
+								</thead>
+								<tbody>
+									{#each evaluatedEstimate.excludedItems as item}
+										<tr>
+											<td class="border border-gray-300 px-3 py-2 align-top">{item.item}</td>
+											<td class="border border-gray-300 px-3 py-2 align-top">{item.reason}</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					{/if}
+
+					<div>
+						<div class="mb-3 text-xl font-semibold">Line Items</div>
+						<table class="w-full border-collapse text-left text-sm">
+							<thead>
+								<tr class="bg-gray-100 text-gray-700">
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Item</th>
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Quantity</th>
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Material/Unit</th>
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Material Total</th>
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Labor Total</th>
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Task Total</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each evaluatedEstimate.lineItems as lineItem}
+									<tr>
+										<td class="border border-gray-300 px-3 py-2 align-top">{lineItem.item}</td>
+										<td class="border border-gray-300 px-3 py-2 align-top">{lineItem.quantity}</td>
+										<td class="border border-gray-300 px-3 py-2 align-top">
+											{lineItem.materialPerUnitDisplay || '—'}
+										</td>
+										<td class="border border-gray-300 px-3 py-2 align-top">
+											{lineItem.materialTotalDisplay || '—'}
+										</td>
+										<td class="border border-gray-300 px-3 py-2 align-top">
+											{lineItem.laborDisplay || '—'}
+										</td>
+										<td class="border border-gray-300 px-3 py-2 align-top">
+											{lineItem.taskInput || '—'}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+
+					<div>
+						<div class="mb-3 text-xl font-semibold">Totals</div>
+						<table class="w-full border-collapse text-left text-sm">
+							<thead>
+								<tr class="bg-gray-100 text-gray-700">
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Metric</th>
+									<th class="border border-gray-300 px-3 py-2 font-semibold">Amount</th>
+								</tr>
+							</thead>
+							<tbody>
+								<tr>
+									<td class="border border-gray-300 px-3 py-2">Total Materials</td>
+									<td class="border border-gray-300 px-3 py-2">
+										{evaluatedEstimate.totals.totalMaterials || '—'}
+									</td>
+								</tr>
+								<tr>
+									<td class="border border-gray-300 px-3 py-2">Total Labor</td>
+									<td class="border border-gray-300 px-3 py-2">
+										{evaluatedEstimate.totals.totalLabor || '—'}
+									</td>
+								</tr>
+								<tr>
+									<td class="border border-gray-300 px-3 py-2">Subtotal</td>
+									<td class="border border-gray-300 px-3 py-2">
+										{evaluatedEstimate.totals.subtotal || '—'}
+									</td>
+								</tr>
+								<tr>
+									<td class="border border-gray-300 px-3 py-2">Contingency</td>
+									<td class="border border-gray-300 px-3 py-2">
+										<div class="flex items-center justify-between gap-4">
+											<span>{evaluatedEstimate.totals.contingency || '—'}</span>
+											<span class="text-gray-600">
+												{evaluatedEstimate.contingencyPercentInput || '—'}%
+											</span>
+										</div>
+									</td>
+								</tr>
+								<tr>
+									<td class="border border-gray-300 px-3 py-2 font-semibold">Total Cost</td>
+									<td class="border border-gray-300 px-3 py-2 font-semibold">
+										{evaluatedEstimate.totals.totalCost || '—'}
+									</td>
+								</tr>
+							</tbody>
+						</table>
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}
 {/if}
