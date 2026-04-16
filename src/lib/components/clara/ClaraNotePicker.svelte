@@ -2,6 +2,7 @@
 	import { createEventDispatcher, getContext, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 
+	import dayjs from '$lib/dayjs';
 	import Modal from '$lib/components/common/Modal.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import Note from '$lib/components/icons/Note.svelte';
@@ -23,6 +24,8 @@
 	let creating = false;
 	let noteList: NoteItem[] = [];
 	let newNoteTitle = '';
+
+	const getDefaultNoteTitle = () => dayjs().format('YYYY-MM-DD HH:mm');
 
 	const close = () => {
 		show = false;
@@ -48,7 +51,7 @@
 		if (creating) return;
 
 		creating = true;
-		const title = newNoteTitle.trim() || $i18n.t('Clara Note');
+		const title = newNoteTitle.trim() || getDefaultNoteTitle();
 		const note = await createNewNote(localStorage.token, {
 			title,
 			data: {

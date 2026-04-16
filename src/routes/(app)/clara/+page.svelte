@@ -86,9 +86,7 @@
 	const appendTranscript = (existingContent: string, transcript: string) => {
 		const trimmedExisting = existingContent.trim();
 		const trimmedTranscript = transcript.trim();
-		const heading = `## ${dayjs().format('YYYY-MM-DD HH:mm')}`;
-		const block = `${heading}\n${trimmedTranscript}`;
-		return trimmedExisting ? `${trimmedExisting}\n\n${block}` : block;
+		return trimmedExisting ? `${trimmedExisting}\n\n${trimmedTranscript}` : trimmedTranscript;
 	};
 
 	const stopStream = () => {
