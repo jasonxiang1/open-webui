@@ -22,7 +22,8 @@
 		updateFileDataContentById,
 		uploadFile,
 		deleteFileById,
-		getFileById
+		getFileById,
+		generateSummaryById
 	} from '$lib/apis/files';
 	import {
 		addFileToKnowledgeById,
