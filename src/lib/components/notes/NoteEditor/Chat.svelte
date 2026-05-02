@@ -35,15 +35,10 @@
 	import { goto } from '$app/navigation';
 	import { onMount, tick, getContext } from 'svelte';
 
-	import {
-		OLLAMA_API_BASE_URL,
-		OPENAI_API_BASE_URL,
-		WEBUI_API_BASE_URL,
-		WEBUI_BASE_URL
-	} from '$lib/constants';
+	import { WEBUI_BASE_URL } from '$lib/constants';
 	import { WEBUI_NAME, config, user, models, settings } from '$lib/stores';
 
-	import { chatCompletion, generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { chatCompletion } from '$lib/apis/openai';
 
 	import { splitStream } from '$lib/utils';
 
@@ -56,11 +51,14 @@
 
 	const i18n = getContext('i18n');
 
+	export let editor = null;
+
 	export let editing = false;
 	export let streaming = false;
 	export let stopResponseFlag = false;
 
 	export let note = null;
+	export let selectedContent = null;
 
 	export let files = [];
 	export let messages = [];
@@ -79,20 +77,23 @@
 	let messagesContainerElement: HTMLDivElement;
 
 	let system = '';
-	let editorEnabled = false;
+	let editEnabled = false;
 	let chatInputElement = null;
 
 	const DEFAULT_DOCUMENT_EDITOR_PROMPT = `You are an expert document editor.
 
 ## Task
-Based on the user's instruction, update and enhance the existing notes by incorporating relevant and accurate information from the provided context in the content's primary language. Ensure all edits strictly follow the user’s intent.
+Based on the user's instruction, update and enhance the existing notes or selection by incorporating relevant and accurate information from the provided context in the content's primary language. Ensure all edits strictly follow the user’s intent.
 
 ## Input Structure
 - Existing notes: Enclosed within <notes></notes> XML tags.
 - Additional context: Enclosed within <context></context> XML tags.
+- Current note selection: Enclosed within <selection></selection> XML tags.
 - Editing instruction: Provided in the user message.
 
 ## Output Instructions
+- If a selection is provided, edit **only** the content within <selection></selection>. Leave unselected parts unchanged.
+- If no selection is provided, edit the entire notes.
 - Deliver a single, rewritten version of the notes in markdown format.
 - Integrate information from the context only if it directly supports the user's instruction.
 - Use clear, organized markdown elements: headings, lists, task lists ([ ]) where tasks or checklists are strongly implied, bold and italic text as appropriate.
@@ -155,7 +156,7 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 
 		system = '';
 
-		if (editorEnabled) {
+		if (editEnabled) {
 			system = `${DEFAULT_DOCUMENT_EDITOR_PROMPT}\n\n`;
 		} else {
 			system = `You are a helpful assistant. Please answer the user's questions based on the context provided.\n\n`;
@@ -165,7 +166,8 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 			`<notes>${note?.data?.content?.md ?? ''}</notes>` +
 			(files && files.length > 0
 				? `\n<context>${files.map((file) => `${file.name}: ${file?.file?.data?.content ?? 'Could not extract content'}\n`).join('')}</context>`
-				: '');
+				: '') +
+			(selectedContent ? `\n<selection>${selectedContent?.text}</selection>` : '');
 
 		const chatMessages = JSON.parse(
 			JSON.stringify([
@@ -182,7 +184,10 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 			{
 				model: model.id,
 				stream: true,
-				messages: chatMessages
+				messages: chatMessages.map((m) => ({
+					role: m.role,
+					content: m.content
+				}))
 				// ...(files && files.length > 0 ? { files } : {}) // TODO: Decide whether to use native file handling or not
 			},
 			`${WEBUI_BASE_URL}/api`
@@ -206,7 +211,7 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 						controller.abort('User: Stop Response');
 					}
 
-					if (editorEnabled) {
+					if (editEnabled) {
 						editing = false;
 						streaming = false;
 						onEdited();
@@ -222,8 +227,20 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 						if (line !== '') {
 							console.log(line);
 							if (line === 'data: [DONE]') {
-								if (editorEnabled) {
+								if (editEnabled) {
 									responseMessage.content = `<status title="${$i18n.t('Edited')}" done="true" />`;
+
+									if (selectedContent && selectedContent?.text && editor) {
+										editor.commands.insertContentAt(
+											{
+												from: selectedContent.from,
+												to: selectedContent.to
+											},
+											enhancedContent.html || enhancedContent.md || ''
+										);
+
+										selectedContent = null;
+									}
 								}
 
 								responseMessage.done = true;
@@ -236,20 +253,22 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 								if (responseMessage.content == '' && deltaContent == '\n') {
 									continue;
 								} else {
-									if (editorEnabled) {
+									if (editEnabled) {
 										editing = true;
 										streaming = true;
 
 										enhancedContent.md += deltaContent;
 										enhancedContent.html = marked.parse(enhancedContent.md);
 
-										note.data.content.md = enhancedContent.md;
-										note.data.content.html = enhancedContent.html;
-										note.data.content.json = null;
-
-										responseMessage.content = `<status title="${$i18n.t('Editing')}" done="false" />`;
+										if (!selectedContent || !selectedContent?.text) {
+											note.data.content.md = enhancedContent.md;
+											note.data.content.html = enhancedContent.html;
+											note.data.content.json = null;
+										}
 
 										scrollToBottomHandler();
+
+										responseMessage.content = `<status title="${$i18n.t('Editing')}" done="false" />`;
 										messages = messages;
 									} else {
 										messageContent += deltaContent;
@@ -297,11 +316,7 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 	};
 
 	onMount(async () => {
-		if ($user?.role !== 'admin') {
-			await goto('/');
-		}
-
-		editorEnabled = localStorage.getItem('noteEditorEnabled') === 'true';
+		editEnabled = localStorage.getItem('noteEditEnabled') === 'true';
 
 		loaded = true;
 
@@ -311,7 +326,7 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 </script>
 
 <div class="flex items-center mb-1.5 pt-1.5">
-	<div class=" -translate-x-1.5 flex items-center">
+	<div class="flex items-center mr-1">
 		<button
 			class="p-0.5 bg-transparent transition rounded-lg"
 			on:click={() => {
@@ -341,7 +356,7 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 	</div>
 </div>
 
-<div class="flex flex-col items-center mb-2 flex-1 @container">
+<div class="flex flex-col items-center flex-1 @container">
 	<div class=" flex flex-col justify-between w-full overflow-y-auto h-full">
 		<div class="mx-auto w-full md:px-0 h-full relative">
 			<div class=" flex flex-col h-full">
@@ -358,12 +373,22 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 					</div>
 				</div>
 
-				<div class=" pb-2">
+				<div class=" pb-[1rem]">
+					{#if selectedContent}
+						<div class="text-xs rounded-xl px-2.5 py-3 w-full markdown-prose-xs">
+							<blockquote>
+								<div class=" line-clamp-3">
+									{selectedContent?.text}
+								</div>
+							</blockquote>
+						</div>
+					{/if}
+
 					<MessageInput
 						bind:chatInputElement
 						acceptFiles={false}
 						inputLoading={loading}
-						showFormattingButtons={false}
+						showFormattingToolbar={false}
 						onSubmit={submitHandler}
 						{onStop}
 					>
@@ -372,14 +397,15 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 								<Tooltip content={$i18n.t('Edit')} placement="top">
 									<button
 										on:click|preventDefault={() => {
-											editorEnabled = !editorEnabled;
+											editEnabled = !editEnabled;
 
-											localStorage.setItem('noteEditorEnabled', editorEnabled ? 'true' : 'false');
+											localStorage.setItem('noteEditEnabled', editEnabled ? 'true' : 'false');
 										}}
+										disabled={streaming || loading}
 										type="button"
-										class="px-2 @xl:px-2.5 py-2 flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden hover:bg-gray-50 dark:hover:bg-gray-800 {editorEnabled
+										class="px-2 @xl:px-2.5 py-2 flex gap-1.5 items-center text-sm rounded-full transition-colors duration-300 focus:outline-hidden max-w-full overflow-hidden hover:bg-gray-50 dark:hover:bg-gray-800 {editEnabled
 											? ' text-sky-500 dark:text-sky-300 bg-sky-50 dark:bg-sky-200/5'
-											: 'bg-transparent text-gray-600 dark:text-gray-300 '}"
+											: 'bg-transparent text-gray-600 dark:text-gray-300 '} disabled:opacity-50 disabled:pointer-events-none"
 									>
 										<PencilSquare className="size-4" strokeWidth="1.75" />
 										<span
@@ -395,7 +421,7 @@ Based on the user's instruction, update and enhance the existing notes by incorp
 									class=" bg-transparent rounded-lg py-1 px-2 -mx-0.5 text-sm outline-hidden w-full text-right pr-5"
 									bind:value={selectedModelId}
 								>
-									{#each $models as model}
+									{#each $models.filter((model) => !(model?.info?.meta?.hidden ?? false)) as model}
 										<option value={model.id} class="bg-gray-50 dark:bg-gray-700"
 											>{model.name}</option
 										>

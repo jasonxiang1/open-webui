@@ -1,5 +1,7 @@
 <script lang="ts">
 	import { marked } from 'marked';
+	import DOMPurify from 'dompurify';
+
 	marked.use({
 		breaks: true,
 		gfm: true,
@@ -27,14 +29,57 @@
 	});
 
 	import TurndownService from 'turndown';
-	import { gfm } from 'turndown-plugin-gfm';
+	import { gfm } from '@joplin/turndown-plugin-gfm';
 	const turndownService = new TurndownService({
 		codeBlockStyle: 'fenced',
 		headingStyle: 'atx'
 	});
 	turndownService.escape = (string) => string;
+
 	// Use turndown-plugin-gfm for proper GFM table support
 	turndownService.use(gfm);
+
+	// Add custom table header rule before using GFM plugin
+	turndownService.addRule('tableHeaders', {
+		filter: 'th',
+		replacement: function (content, node) {
+			return content;
+		}
+	});
+
+	// Add custom table rule to handle headers properly
+	turndownService.addRule('tables', {
+		filter: 'table',
+		replacement: function (content, node) {
+			// Extract rows
+			const rows = Array.from(node.querySelectorAll('tr'));
+			if (rows.length === 0) return content;
+
+			let markdown = '\n';
+
+			rows.forEach((row, rowIndex) => {
+				const cells = Array.from(row.querySelectorAll('th, td'));
+				const cellContents = cells.map((cell) => {
+					// Get the text content and clean it up
+					let cellContent = turndownService.turndown(cell.innerHTML).trim();
+					// Remove extra paragraph tags that might be added
+					cellContent = cellContent.replace(/^\n+|\n+$/g, '');
+					return cellContent;
+				});
+
+				// Add the row
+				markdown += '| ' + cellContents.join(' | ') + ' |\n';
+
+				// Add separator after first row (which should be headers)
+				if (rowIndex === 0) {
+					const separator = cells.map(() => '---').join(' | ');
+					markdown += '| ' + separator + ' |\n';
+				}
+			});
+
+			return markdown + '\n';
+		}
+	});
 
 	turndownService.addRule('taskListItems', {
 		filter: (node) =>
@@ -48,6 +93,18 @@
 		}
 	});
 
+	// Convert TipTap mention spans -> <@id>
+	turndownService.addRule('mentions', {
+		filter: (node) => node.nodeName === 'SPAN' && node.getAttribute('data-type') === 'mention',
+		replacement: (_content, node: HTMLElement) => {
+			const id = node.getAttribute('data-id') || '';
+			// TipTap stores the trigger char in data-mention-suggestion-char (usually "@")
+			const ch = node.getAttribute('data-mention-suggestion-char') || '@';
+			// Emit <@id> style, e.g. <@llama3.2:latest>
+			return `<${ch}${id}>`;
+		}
+	});
+
 	import { onMount, onDestroy, tick, getContext } from 'svelte';
 	import { createEventDispatcher } from 'svelte';
 
@@ -56,65 +113,150 @@
 
 	import { Fragment, DOMParser } from 'prosemirror-model';
 	import { EditorState, Plugin, PluginKey, TextSelection, Selection } from 'prosemirror-state';
-	import { Editor, Extension } from '@tiptap/core';
-
-	// Yjs imports
-	import * as Y from 'yjs';
-	import {
-		ySyncPlugin,
-		yCursorPlugin,
-		yUndoPlugin,
-		undo,
-		redo,
-		prosemirrorJSONToYDoc,
-		yDocToProsemirrorJSON
-	} from 'y-prosemirror';
-	import { keymap } from 'prosemirror-keymap';
+	import { Decoration, DecorationSet } from 'prosemirror-view';
+	import { Editor, Extension, markInputRule, mergeAttributes } from '@tiptap/core';
 
 	import { AIAutocompletion } from './RichTextInput/AutoCompletion.js';
-	import Table from '@tiptap/extension-table';
-	import TableRow from '@tiptap/extension-table-row';
-	import TableHeader from '@tiptap/extension-table-header';
-	import TableCell from '@tiptap/extension-table-cell';
 
-	import Link from '@tiptap/extension-link';
-	import Underline from '@tiptap/extension-underline';
-	import TaskItem from '@tiptap/extension-task-item';
-	import TaskList from '@tiptap/extension-task-list';
-
-	import CharacterCount from '@tiptap/extension-character-count';
-
-	import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
-	import Placeholder from '@tiptap/extension-placeholder';
 	import StarterKit from '@tiptap/starter-kit';
-	import Highlight from '@tiptap/extension-highlight';
-	import Typography from '@tiptap/extension-typography';
 
+	// Bubble and Floating menus are currently fixed to v2 due to styling issues in v3
+	// TODO: Update to v3 when styling issues are resolved
 	import BubbleMenu from '@tiptap/extension-bubble-menu';
 	import FloatingMenu from '@tiptap/extension-floating-menu';
 
-	import { all, createLowlight } from 'lowlight';
+	import { TableKit } from '@tiptap/extension-table';
+	import { ListKit } from '@tiptap/extension-list';
+	import { Placeholder, CharacterCount } from '@tiptap/extensions';
+
+	import Image from './RichTextInput/Image/index.js';
+	// import TiptapImage from '@tiptap/extension-image';
+
+	import FileHandler from '@tiptap/extension-file-handler';
+	import Typography from '@tiptap/extension-typography';
+	import Highlight from '@tiptap/extension-highlight';
+	import Code from '@tiptap/extension-code';
+	import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
+
+	// WORKAROUND: TipTap's default Code mark input rule regex captures the
+	// character before the opening backtick, causing it to be deleted.
+	// This uses a lookbehind assertion instead so the preceding character is
+	// matched for position but not captured/deleted.
+	// Upstream fix: https://github.com/ueberdosis/tiptap/pull/7124
+	const backtickInputRegex = /(?<=\s|^)`([^`]+)`(?!`)$/;
+	const FixedCode = Code.extend({
+		addInputRules() {
+			return [
+				markInputRule({
+					find: backtickInputRegex,
+					type: this.type
+				})
+			];
+		}
+	});
+
+	import Mention from '@tiptap/extension-mention';
+	import FormattingButtons from './RichTextInput/FormattingButtons.svelte';
 
 	import { PASTED_TEXT_CHARACTER_LIMIT } from '$lib/constants';
+	import { createLowlight } from 'lowlight';
+	import hljs from 'highlight.js';
 
-	import FormattingButtons from './RichTextInput/FormattingButtons.svelte';
+	import type { SocketIOCollaborationProvider } from './RichTextInput/Collaboration';
 
 	export let oncompositionstart = (e) => {};
 	export let oncompositionend = (e) => {};
 	export let onChange = (e) => {};
 
 	// create a lowlight instance with all languages loaded
-	const lowlight = createLowlight(all);
+	const lowlight = createLowlight(
+		hljs.listLanguages().reduce(
+			(obj, lang) => {
+				obj[lang] = () => hljs.getLanguage(lang);
+				return obj;
+			},
+			{} as Record<string, any>
+		)
+	);
 
-	export let editor = null;
+	export let editor: Editor | null = null;
 
 	export let socket = null;
 	export let user = null;
+	export let files = [];
+
 	export let documentId = '';
 
-	export let className = 'input-prose';
-	export let placeholder = 'Type here...';
+	export let className = 'input-prose min-h-fit h-full';
+	export let placeholder = $i18n.t('Type here...');
+	let _placeholder = placeholder;
+
+	$: if (placeholder !== _placeholder) {
+		setPlaceholder();
+	}
+
+	const setPlaceholder = () => {
+		_placeholder = placeholder;
+		if (editor) {
+			editor?.view.dispatch(editor.state.tr);
+		}
+	};
+
+	export let richText = true;
+	export let dragHandle = false;
 	export let link = false;
+	export let image = false;
+	export let fileHandler = false;
+	export let suggestions = null;
+
+	export let onFileDrop = (currentEditor, files, pos) => {
+		files.forEach((file) => {
+			const fileReader = new FileReader();
+
+			fileReader.readAsDataURL(file);
+			fileReader.onload = () => {
+				currentEditor
+					.chain()
+					.insertContentAt(pos, {
+						type: 'image',
+						attrs: {
+							src: fileReader.result
+						}
+					})
+					.focus()
+					.run();
+			};
+		});
+	};
+
+	export let onFilePaste = (currentEditor, files, htmlContent) => {
+		files.forEach((file) => {
+			if (htmlContent) {
+				// if there is htmlContent, stop manual insertion & let other extensions handle insertion via inputRule
+				// you could extract the pasted file from this url string and upload it to a server for example
+				console.log(htmlContent); // eslint-disable-line no-console
+				return false;
+			}
+
+			const fileReader = new FileReader();
+
+			fileReader.readAsDataURL(file);
+			fileReader.onload = () => {
+				currentEditor
+					.chain()
+					.insertContentAt(currentEditor.state.selection.anchor, {
+						type: 'image',
+						attrs: {
+							src: fileReader.result
+						}
+					})
+					.focus()
+					.run();
+			};
+		});
+	};
+
+	export let onSelectionUpdate = (e) => {};
 
 	export let id = '';
 	export let value = '';
@@ -125,7 +267,7 @@
 	export let editable = true;
 	export let collaboration = false;
 
-	export let showFormattingButtons = true;
+	export let showFormattingToolbar = true;
 
 	export let preserveBreaks = false;
 	export let generateAutoCompletion: Function = async () => null;
@@ -141,299 +283,11 @@
 	let jsonValue = '';
 	let mdValue = '';
 
-	// Yjs setup
-	let ydoc = null;
-	let yXmlFragment = null;
-	let awareness = null;
+	let provider: SocketIOCollaborationProvider | null = null;
 
-	// Custom Yjs Socket.IO provider
-	class SocketIOProvider {
-		constructor(doc, documentId, socket, user) {
-			this.doc = doc;
-			this.documentId = documentId;
-			this.socket = socket;
-			this.user = user;
-			this.isConnected = false;
-			this.synced = false;
-
-			this.setupEventListeners();
-		}
-
-		generateUserColor() {
-			const colors = [
-				'#FF6B6B',
-				'#4ECDC4',
-				'#45B7D1',
-				'#96CEB4',
-				'#FFEAA7',
-				'#DDA0DD',
-				'#98D8C8',
-				'#F7DC6F',
-				'#BB8FCE',
-				'#85C1E9'
-			];
-			return colors[Math.floor(Math.random() * colors.length)];
-		}
-
-		joinDocument() {
-			const userColor = this.generateUserColor();
-			this.socket.emit('ydoc:document:join', {
-				document_id: this.documentId,
-				user_id: this.user?.id,
-				user_name: this.user?.name,
-				user_color: userColor
-			});
-
-			// Set user awareness info
-			if (awareness && this.user) {
-				awareness.setLocalStateField('user', {
-					name: `${this.user.name}`,
-					color: userColor,
-					id: this.socket.id
-				});
-			}
-		}
-
-		setupEventListeners() {
-			// Listen for document updates from server
-			this.socket.on('ydoc:document:update', (data) => {
-				if (data.document_id === this.documentId && data.socket_id !== this.socket.id) {
-					try {
-						const update = new Uint8Array(data.update);
-						Y.applyUpdate(this.doc, update);
-					} catch (error) {
-						console.error('Error applying Yjs update:', error);
-					}
-				}
-			});
-
-			// Listen for document state from server
-			this.socket.on('ydoc:document:state', async (data) => {
-				if (data.document_id === this.documentId) {
-					try {
-						if (data.state) {
-							const state = new Uint8Array(data.state);
-
-							if (state.length === 2 && state[0] === 0 && state[1] === 0) {
-								// Empty state, check if we have content to initialize
-								// check if editor empty as well
-								const isEmptyEditor = !editor || editor.getText().trim() === '';
-								if (content && isEmptyEditor && (data?.sessions ?? ['']).length === 1) {
-									const editorYdoc = prosemirrorJSONToYDoc(editor.schema, content);
-									if (editorYdoc) {
-										Y.applyUpdate(this.doc, Y.encodeStateAsUpdate(editorYdoc));
-									}
-								}
-							} else {
-								Y.applyUpdate(this.doc, state, 'server');
-							}
-						}
-						this.synced = true;
-					} catch (error) {
-						console.error('Error applying Yjs state:', error);
-
-						this.synced = false;
-						this.socket.emit('ydoc:document:state', {
-							document_id: this.documentId
-						});
-					}
-				}
-			});
-
-			// Listen for awareness updates
-			this.socket.on('ydoc:awareness:update', (data) => {
-				if (data.document_id === this.documentId && awareness) {
-					try {
-						const awarenessUpdate = new Uint8Array(data.update);
-						awareness.applyUpdate(awarenessUpdate, 'server');
-					} catch (error) {
-						console.error('Error applying awareness update:', error);
-					}
-				}
-			});
-
-			// Handle connection events
-			this.socket.on('connect', this.onConnect);
-			this.socket.on('disconnect', this.onDisconnect);
-
-			// Listen for document updates from Yjs
-			this.doc.on('update', async (update, origin) => {
-				if (origin !== 'server' && this.isConnected) {
-					await tick(); // Ensure the DOM is updated before sending
-					this.socket.emit('ydoc:document:update', {
-						document_id: this.documentId,
-						user_id: this.user?.id,
-						socket_id: this.socket.id,
-						update: Array.from(update),
-						data: {
-							content: {
-								md: mdValue,
-								html: htmlValue,
-								json: jsonValue
-							}
-						}
-					});
-				}
-			});
-
-			// Listen for awareness updates from Yjs
-			if (awareness) {
-				awareness.on('change', ({ added, updated, removed }, origin) => {
-					if (origin !== 'server' && this.isConnected) {
-						const changedClients = added.concat(updated).concat(removed);
-						const awarenessUpdate = awareness.encodeUpdate(changedClients);
-						this.socket.emit('ydoc:awareness:update', {
-							document_id: this.documentId,
-							user_id: this.socket.id,
-							update: Array.from(awarenessUpdate)
-						});
-					}
-				});
-			}
-
-			if (this.socket.connected) {
-				this.isConnected = true;
-				this.joinDocument();
-			}
-		}
-
-		onConnect = () => {
-			this.isConnected = true;
-			this.joinDocument();
-		};
-
-		onDisconnect = () => {
-			this.isConnected = false;
-			this.synced = false;
-		};
-
-		destroy() {
-			this.socket.off('ydoc:document:update');
-			this.socket.off('ydoc:document:state');
-			this.socket.off('ydoc:awareness:update');
-			this.socket.off('connect', this.onConnect);
-			this.socket.off('disconnect', this.onDisconnect);
-
-			if (this.isConnected) {
-				this.socket.emit('ydoc:document:leave', {
-					document_id: this.documentId,
-					user_id: this.user?.id
-				});
-			}
-		}
-	}
-
-	let provider = null;
-
-	// Simple awareness implementation
-	class SimpleAwareness {
-		constructor(yDoc) {
-			// Yjs awareness expects clientID (not clientId) property
-			this.clientID = yDoc ? yDoc.clientID : Math.floor(Math.random() * 0xffffffff);
-			// Map from clientID (number) to state (object)
-			this._states = new Map(); // _states, not states; will make getStates() for compat
-			this._updateHandlers = [];
-			this._localState = {};
-			// As in Yjs Awareness, add our local state to the states map from the start:
-			this._states.set(this.clientID, this._localState);
-		}
-		on(event, handler) {
-			if (event === 'change') this._updateHandlers.push(handler);
-		}
-		off(event, handler) {
-			if (event === 'change') {
-				const i = this._updateHandlers.indexOf(handler);
-				if (i !== -1) this._updateHandlers.splice(i, 1);
-			}
-		}
-		getLocalState() {
-			return this._states.get(this.clientID) || null;
-		}
-		getStates() {
-			// Yjs returns a Map (clientID->state)
-			return this._states;
-		}
-		setLocalStateField(field, value) {
-			let localState = this._states.get(this.clientID);
-			if (!localState) {
-				localState = {};
-				this._states.set(this.clientID, localState);
-			}
-			localState[field] = value;
-			// After updating, fire 'update' event to all handlers
-			for (const cb of this._updateHandlers) {
-				// Follows Yjs Awareness ({ added, updated, removed }, origin)
-				cb({ added: [], updated: [this.clientID], removed: [] }, 'local');
-			}
-		}
-		applyUpdate(update, origin) {
-			// Very simple: Accepts a serialized JSON state for now as Uint8Array
-			try {
-				const str = new TextDecoder().decode(update);
-				const obj = JSON.parse(str);
-				// Should be a plain object: { clientID: state, ... }
-				for (const [k, v] of Object.entries(obj)) {
-					this._states.set(+k, v);
-				}
-				for (const cb of this._updateHandlers) {
-					cb({ added: [], updated: Array.from(Object.keys(obj)).map(Number), removed: [] }, origin);
-				}
-			} catch (e) {
-				console.warn('SimpleAwareness: Could not decode update:', e);
-			}
-		}
-		encodeUpdate(clients) {
-			// Encodes the states for the given clientIDs as Uint8Array (JSON)
-			const obj = {};
-			for (const id of clients || Array.from(this._states.keys())) {
-				const st = this._states.get(id);
-				if (st) obj[id] = st;
-			}
-			const json = JSON.stringify(obj);
-			return new TextEncoder().encode(json);
-		}
-	}
-
-	// Yjs collaboration extension
-	const YjsCollaboration = Extension.create({
-		name: 'yjsCollaboration',
-
-		addProseMirrorPlugins() {
-			if (!collaboration || !yXmlFragment) return [];
-
-			const plugins = [
-				ySyncPlugin(yXmlFragment),
-				yUndoPlugin(),
-				keymap({
-					'Mod-z': undo,
-					'Mod-y': redo,
-					'Mod-Shift-z': redo
-				})
-			];
-
-			if (awareness) {
-				plugins.push(yCursorPlugin(awareness));
-			}
-
-			return plugins;
-		}
-	});
-
-	function initializeCollaboration() {
-		if (!collaboration) return;
-
-		// Create Yjs document
-		ydoc = new Y.Doc();
-		yXmlFragment = ydoc.getXmlFragment('prosemirror');
-		awareness = new SimpleAwareness(ydoc);
-
-		// Create custom Socket.IO provider
-		provider = new SocketIOProvider(ydoc, documentId, socket, user);
-	}
-
-	let floatingMenuElement = null;
-	let bubbleMenuElement = null;
-	let element;
+	let floatingMenuElement: Element | null = null;
+	let bubbleMenuElement: Element | null = null;
+	let element: Element | null = null;
 
 	const options = {
 		throwOnError: false
@@ -502,12 +356,14 @@
 		let tr = state.tr;
 
 		if (insertPromptAsRichText) {
-			const htmlContent = marked
-				.parse(text, {
-					breaks: true,
-					gfm: true
-				})
-				.trim();
+			const htmlContent = DOMPurify.sanitize(
+				marked
+					.parse(text, {
+						breaks: true,
+						gfm: true
+					})
+					.trim()
+			);
 
 			// Create a temporary div to parse HTML
 			const tempDiv = document.createElement('div');
@@ -578,39 +434,48 @@
 	};
 
 	export const setText = (text: string) => {
-		if (!editor) return;
+		if (!editor || !editor.view) return;
 		text = text.replaceAll('\n\n', '\n');
-		const { state, view } = editor;
-		const { schema, tr } = state;
 
-		if (text.includes('\n')) {
-			// Multiple lines: make paragraphs
-			const lines = text.split('\n');
-			// Map each line to a paragraph node (empty lines -> empty paragraph)
-			const nodes = lines.map((line) =>
-				schema.nodes.paragraph.create({}, line ? schema.text(line) : undefined)
-			);
-			// Create a document fragment containing all parsed paragraphs
-			const fragment = Fragment.fromArray(nodes);
-			// Replace current selection with these paragraphs
-			tr.replaceSelectionWith(fragment, false /* don't select new */);
-			view.dispatch(tr);
-		} else if (text === '') {
-			// Empty: replace with empty paragraph using tr
+		if (text === '') {
 			editor.commands.clearContent();
 		} else {
-			// Single line: create paragraph with text
-			const paragraph = schema.nodes.paragraph.create({}, schema.text(text));
-			tr.replaceSelectionWith(paragraph, false);
-			view.dispatch(tr);
+			// Regex to find serialized mention tags: <@id>, <#id>, <$id|label>
+			const mentionReG = /<([@#$])([\w.\-:/]+)(?:\|([^>]*))?>/g;
+
+			// Convert each line to a <p>, replacing mention tags with proper
+			// TipTap mention spans that the editor's DOMParser will recognise.
+			const lines = text.split('\n');
+			const htmlContent = lines
+				.map((line) => {
+					if (!line) return '<p></p>';
+					// Escape HTML entities in the line FIRST so we don't corrupt
+					// user text that happens to contain < or >, then re-inject
+					// the mention spans.
+					const escaped = line.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+					// Now replace the escaped mention patterns back into real spans
+					const withMentions = escaped.replace(
+						/&lt;([@#$])([\w.\-:/]+)(?:\|([^&]*?))?&gt;/g,
+						(_, ch, id, label) => {
+							const display = label?.length ? label : id;
+							return `<span class="mention" data-type="mention" data-id="${id}" data-label="${display}" data-mention-suggestion-char="${ch}">${ch}${display}</span>`;
+						}
+					);
+					return `<p>${withMentions}</p>`;
+				})
+				.join('');
+
+			editor.commands.setContent(htmlContent);
 		}
 
 		selectNextTemplate(editor.view.state, editor.view.dispatch);
+
+		// Ensure the editor is still valid before trying to focus
 		focus();
 	};
 
 	export const insertContent = (content) => {
-		if (!editor) return;
+		if (!editor || !editor.view) return;
 		const { state, view } = editor;
 		const { schema, tr } = state;
 
@@ -623,8 +488,19 @@
 		focus();
 	};
 
+	// Convert text to ProseMirror nodes, using hardBreak for newlines
+	const textToNodes = (state, text) => {
+		if (!text.includes('\n')) return state.schema.text(text);
+		const nodes = [];
+		text.split('\n').forEach((line, i) => {
+			if (i > 0) nodes.push(state.schema.nodes.hardBreak.create());
+			if (line) nodes.push(state.schema.text(line));
+		});
+		return nodes;
+	};
+
 	export const replaceVariables = (variables) => {
-		if (!editor) return;
+		if (!editor || !editor.view) return;
 		const { state, view } = editor;
 		const { doc } = state;
 
@@ -657,7 +533,7 @@
 
 		// Apply replacements in reverse order to maintain correct positions
 		replacements.reverse().forEach(({ from, to, text }) => {
-			tr = tr.replaceWith(from, to, text !== '' ? state.schema.text(text) : []);
+			tr = tr.replaceWith(from, to, text !== '' ? textToNodes(state, text) : []);
 		});
 
 		// Only dispatch if there are changes
@@ -667,10 +543,20 @@
 	};
 
 	export const focus = () => {
-		if (editor) {
-			editor.view.focus();
-			// Scroll to the current selection
-			editor.view.dispatch(editor.view.state.tr.scrollIntoView());
+		if (editor && editor.view) {
+			// Check if the editor is destroyed
+			if (editor.isDestroyed) {
+				return;
+			}
+
+			try {
+				editor.view.focus();
+				// Scroll to the current selection
+				editor.view.dispatch(editor.view.state.tr.scrollIntoView());
+			} catch (e) {
+				// sometimes focusing throws an error, ignore
+				console.warn('Error focusing editor', e);
+			}
 		}
 	};
 
@@ -748,6 +634,47 @@
 		}
 	};
 
+	const SelectionDecoration = Extension.create({
+		name: 'selectionDecoration',
+		addProseMirrorPlugins() {
+			return [
+				new Plugin({
+					key: new PluginKey('selection'),
+					props: {
+						decorations: (state) => {
+							const { selection } = state;
+							const { focused } = this.editor;
+
+							if (focused || selection.empty) {
+								return null;
+							}
+
+							return DecorationSet.create(state.doc, [
+								Decoration.inline(selection.from, selection.to, {
+									class: 'editor-selection'
+								})
+							]);
+						}
+					}
+				})
+			];
+		}
+	});
+
+	import { listDragHandlePlugin } from './RichTextInput/listDragHandlePlugin.js';
+
+	const ListItemDragHandle = Extension.create({
+		name: 'listItemDragHandle',
+		addProseMirrorPlugins() {
+			return [
+				listDragHandlePlugin({
+					itemTypeNames: ['listItem', 'taskItem'],
+					getEditor: () => this.editor
+				})
+			];
+		}
+	});
+
 	onMount(async () => {
 		content = value;
 
@@ -788,38 +715,59 @@
 			}
 		}
 
-		console.log('content', content);
-
-		if (collaboration) {
-			initializeCollaboration();
+		if (collaboration && documentId && socket && user) {
+			const { SocketIOCollaborationProvider } = await import('./RichTextInput/Collaboration');
+			provider = new SocketIOCollaborationProvider(documentId, socket, user, content);
 		}
-
 		editor = new Editor({
 			element: element,
 			extensions: [
-				StarterKit,
-				CodeBlockLowlight.configure({
-					lowlight
+				StarterKit.configure({
+					link: link,
+					code: false, // Disabled in favor of FixedCode (see workaround above)
+					// When rich text is off, disable Strike from StarterKit so we can
+					// re-add it below without its Mod-Shift-s shortcut (which conflicts
+					// with the Toggle Sidebar shortcut). When rich text is on, the user
+					// can undo strikethrough via the toolbar, so the shortcut is fine.
+					...(richText ? {} : { strike: false })
 				}),
-				Highlight,
-				Typography,
-				Underline,
+				FixedCode,
+				...(dragHandle ? [ListItemDragHandle] : []),
+				Placeholder.configure({ placeholder: () => _placeholder, showOnlyWhenEditable: false }),
+				SelectionDecoration,
 
-				Placeholder.configure({ placeholder }),
-				Table.configure({ resizable: true }),
-				TableRow,
-				TableHeader,
-				TableCell,
-				TaskList,
-				TaskItem.configure({
-					nested: true
-				}),
-				CharacterCount.configure({}),
-				...(link
+				...(richText
 					? [
-							Link.configure({
-								openOnClick: true,
-								linkOnPaste: true
+							CodeBlockLowlight.configure({
+								lowlight
+							}),
+							Typography,
+							TableKit.configure({
+								table: { resizable: true }
+							}),
+							ListKit.configure({
+								taskItem: {
+									nested: true
+								}
+							})
+						]
+					: []),
+				...(suggestions
+					? [
+							Mention.configure({
+								HTMLAttributes: { class: 'mention' },
+								suggestions: suggestions
+							})
+						]
+					: []),
+
+				CharacterCount.configure({}),
+				...(image ? [Image] : []),
+				...(fileHandler
+					? [
+							FileHandler.configure({
+								onDrop: onFileDrop,
+								onPaste: onFilePaste
 							})
 						]
 					: []),
@@ -841,49 +789,89 @@
 							})
 						]
 					: []),
-
-				...(showFormattingButtons
+				...(richText && showFormattingToolbar
 					? [
 							BubbleMenu.configure({
 								element: bubbleMenuElement,
-								tippyOptions: {
-									duration: 100,
-									arrow: false,
+								appendTo: () => document.body,
+								options: {
+									strategy: 'fixed',
 									placement: 'top',
-									theme: 'transparent',
-									offset: [0, 2]
+									offset: 2
+								},
+								shouldShow: ({ editor, view, state, oldState, from, to }) => {
+									// safety check
+									if (!editor || !editor.view || editor.isDestroyed) {
+										return false;
+									}
+									// Only show when editor is focused and text is selected
+									return view.hasFocus() && from !== to;
 								}
 							}),
 							FloatingMenu.configure({
 								element: floatingMenuElement,
-								tippyOptions: {
-									duration: 100,
-									arrow: false,
+								appendTo: () => document.body,
+								options: {
+									strategy: 'fixed',
 									placement: floatingMenuPlacement,
-									theme: 'transparent',
-									offset: [-12, 4]
+									offset: 4
+								},
+								shouldShow: ({ editor, view, state, oldState }) => {
+									// safety check
+									if (!editor || !editor.view || editor.isDestroyed) {
+										return false;
+									}
+									const { selection } = state;
+									const { $anchor, empty } = selection;
+									const isRootDepth = $anchor.depth === 1;
+									const isEmptyTextBlock =
+										$anchor.parent.isTextblock &&
+										!$anchor.parent.type.spec.code &&
+										!$anchor.parent.textContent &&
+										$anchor.parent.childCount === 0;
+
+									// Only show on empty paragraphs at root depth
+									return (
+										view.hasFocus() && empty && isRootDepth && isEmptyTextBlock && editor.isEditable
+									);
 								}
 							})
 						]
 					: []),
-				...(collaboration ? [YjsCollaboration] : [])
+				...(collaboration && provider ? [provider.getEditorExtension()] : [])
 			],
 			content: collaboration ? undefined : content,
 			autofocus: messageInput ? true : false,
 			onTransaction: () => {
 				// force re-render so `editor.isActive` works as expected
 				editor = editor;
+				if (!editor) return;
 
 				htmlValue = editor.getHTML();
 				jsonValue = editor.getJSON();
 
-				mdValue = turndownService
-					.turndown(
-						htmlValue
-							.replace(/<p><\/p>/g, '<br/>')
-							.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
-					)
-					.replace(/\u00a0/g, ' ');
+				if (richText) {
+					mdValue = turndownService
+						.turndown(
+							htmlValue
+								.replace(/<p><\/p>/g, '<br/>')
+								.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
+						)
+						.replace(/\u00a0/g, ' ');
+				} else {
+					mdValue = turndownService
+						.turndown(
+							htmlValue
+								// Replace empty paragraphs with line breaks
+								.replace(/<p><\/p>/g, '<br/>')
+								// Replace multiple spaces with non-breaking spaces
+								.replace(/ {2,}/g, (m) => m.replace(/ /g, '\u00a0'))
+								// Replace tabs with non-breaking spaces (preserve indentation)
+								.replace(/\t/g, '\u00a0\u00a0\u00a0\u00a0') // 1 tab = 4 spaces
+						)
+						// Convert non-breaking spaces back to regular spaces for markdown
+						.replace(/\u00a0/g, ' ');
+				}
 
 				onChange({
 					html: htmlValue,
@@ -916,6 +904,56 @@
 			},
 			editorProps: {
 				attributes: { id },
+				handleDrop: (view, event) => {
+					// Intercept sidebar chat item drops to prevent ProseMirror
+					// from inserting the raw JSON as text. The actual handling
+					// (adding as Reference Chat) is done by MessageInput's onDrop.
+					const textData = event.dataTransfer?.getData('text/plain');
+					if (textData) {
+						try {
+							const data = JSON.parse(textData);
+							if (data.type === 'chat' && data.id) {
+								// Swallow the drop — let the parent handler deal with it
+								return true;
+							}
+						} catch (_) {
+							// Not JSON, let ProseMirror handle normally
+						}
+					}
+					return false;
+				},
+				handlePaste: (view, event) => {
+					// Force plain-text pasting when richText === false
+					if (!richText) {
+						// swallow HTML completely
+						event.preventDefault();
+						const { state, dispatch } = view;
+
+						const plainText = (event.clipboardData?.getData('text/plain') ?? '').replace(
+							/\r\n/g,
+							'\n'
+						);
+
+						const lines = plainText.split('\n');
+						const nodes = [];
+
+						lines.forEach((line, index) => {
+							if (index > 0) {
+								nodes.push(state.schema.nodes.hardBreak.create());
+							}
+							if (line.length > 0) {
+								nodes.push(state.schema.text(line));
+							}
+						});
+
+						const fragment = Fragment.fromArray(nodes);
+						dispatch(state.tr.replaceSelectionWith(fragment, false).scrollIntoView());
+
+						return true; // handled
+					}
+
+					return false;
+				},
 				handleDOMEvents: {
 					compositionstart: (view, event) => {
 						oncompositionstart(event);
@@ -923,6 +961,34 @@
 					},
 					compositionend: (view, event) => {
 						oncompositionend(event);
+						return false;
+					},
+					beforeinput: (view, event) => {
+						// Workaround for Gboard's clipboard suggestion strip which sends
+						// multi-line pastes as 'insertText' rather than a standard paste event.
+						// Manually insert with hard breaks to preserve multi-line formatting.
+						const isAndroid = /Android/i.test(navigator.userAgent);
+						if (isAndroid && event.inputType === 'insertText' && event.data?.includes('\n')) {
+							event.preventDefault();
+
+							const { state, dispatch } = view;
+							const { from, to } = state.selection;
+							const lines = event.data.split('\n');
+							const nodes = [];
+
+							lines.forEach((line, index) => {
+								if (index > 0) {
+									nodes.push(state.schema.nodes.hardBreak.create());
+								}
+								if (line.length > 0) {
+									nodes.push(state.schema.text(line));
+								}
+							});
+
+							const fragment = Fragment.fromArray(nodes);
+							dispatch(state.tr.replaceWith(from, to, fragment).scrollIntoView());
+							return true;
+						}
 						return false;
 					},
 					focus: (view, event) => {
@@ -973,7 +1039,18 @@
 
 							if (event.key === 'Enter') {
 								const isCtrlPressed = event.ctrlKey || event.metaKey; // metaKey is for Cmd key on Mac
+
+								const { state } = view;
+								const { $from } = state.selection;
+								const lineStart = $from.before($from.depth);
+								const lineEnd = $from.after($from.depth);
+								const lineText = state.doc.textBetween(lineStart, lineEnd, '\n', '\0').trim();
 								if (event.shiftKey && !isCtrlPressed) {
+									if (lineText.startsWith('```')) {
+										// Fix GitHub issue #16337: prevent backtick removal for lines starting with ```
+										return false; // Let ProseMirror handle the Enter key normally
+									}
+
 									editor.commands.enter(); // Insert a new line
 									view.dispatch(view.state.tr.scrollIntoView()); // Move viewport to the cursor
 									event.preventDefault();
@@ -983,9 +1060,17 @@
 									const isInList = isInside(['listItem', 'bulletList', 'orderedList', 'taskList']);
 									const isInHeading = isInside(['heading']);
 
+									console.log({ isInCodeBlock, isInList, isInHeading });
+
 									if (isInCodeBlock || isInList || isInHeading) {
 										// Let ProseMirror handle the normal Enter behavior
 										return false;
+									}
+
+									const suggestionsElement = document.getElementById('suggestions-container');
+									if (lineText.startsWith('#') && suggestionsElement) {
+										console.log('Letting heading suggestion handle Enter key');
+										return true;
 									}
 								}
 							}
@@ -1063,7 +1148,10 @@
 							const hasImageItem = Array.from(event.clipboardData.items).some((item) =>
 								item.type.startsWith('image/')
 							);
-							if (hasImageFile || hasImageItem) {
+
+							const hasFile = Array.from(event.clipboardData.files).length > 0;
+
+							if (hasImageFile || hasImageItem || hasFile) {
 								eventDispatch('paste', { event });
 								event.preventDefault();
 								return true;
@@ -1072,10 +1160,50 @@
 						// For all other cases, let ProseMirror perform its default paste behavior.
 						view.dispatch(view.state.tr.scrollIntoView());
 						return false;
+					},
+					copy: (view, event: ClipboardEvent) => {
+						if (!event.clipboardData) return false;
+						if (richText) return false; // Let ProseMirror handle normal copy in rich text mode
+
+						const { state } = view;
+						const { from, to } = state.selection;
+
+						// Only take the selected text & HTML, not the full doc
+						const plain = state.doc.textBetween(from, to, '\n');
+						const slice = state.doc.cut(from, to);
+						const html = editor.schema ? editor.getHTML(slice) : editor.getHTML(); // depending on your editor API
+
+						event.clipboardData.setData('text/plain', plain);
+						event.clipboardData.setData('text/html', html);
+
+						event.preventDefault();
+						return true;
 					}
 				}
-			}
+			},
+			onBeforeCreate: ({ editor }) => {
+				if (files) {
+					editor.storage.files = files;
+				}
+			},
+			onSelectionUpdate: onSelectionUpdate,
+			onBlur: () => {
+				// Force-hide floating menus when editor loses focus.
+				// shouldShow alone isn't enough because it only runs on transactions.
+				if (bubbleMenuElement) {
+					bubbleMenuElement.style.visibility = 'hidden';
+					bubbleMenuElement.style.opacity = '0';
+				}
+				if (floatingMenuElement) {
+					floatingMenuElement.style.visibility = 'hidden';
+					floatingMenuElement.style.opacity = '0';
+				}
+			},
+			enableInputRules: richText,
+			enablePasteRules: richText
 		});
+
+		provider?.setEditor(editor, () => ({ md: mdValue, html: htmlValue, json: jsonValue }));
 
 		if (messageInput) {
 			selectTemplate();
@@ -1145,14 +1273,28 @@
 	};
 </script>
 
-{#if showFormattingButtons}
-	<div bind:this={bubbleMenuElement} class="p-0">
+{#if richText && showFormattingToolbar}
+	<div
+		bind:this={bubbleMenuElement}
+		id="bubble-menu"
+		class="p-0"
+		style="visibility: hidden; opacity: 0; position: absolute; z-index: 9999;"
+	>
 		<FormattingButtons {editor} />
 	</div>
 
-	<div bind:this={floatingMenuElement} class="p-0">
+	<div
+		bind:this={floatingMenuElement}
+		id="floating-menu"
+		class="p-0"
+		style="visibility: hidden; opacity: 0; position: absolute; z-index: 9999;"
+	>
 		<FormattingButtons {editor} />
 	</div>
 {/if}
 
-<div bind:this={element} class="relative w-full min-w-full h-full min-h-fit {className}" />
+<div
+	bind:this={element}
+	dir="auto"
+	class="relative w-full min-w-full {className} {!editable ? 'cursor-not-allowed' : ''}"
+/>

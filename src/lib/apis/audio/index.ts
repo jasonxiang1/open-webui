@@ -1,5 +1,14 @@
 import { AUDIO_API_BASE_URL } from '$lib/constants';
 
+type TranscriptionSessionCreatePayload = {
+	language?: string;
+};
+
+type TranscriptionSessionChunkPayload = {
+	sequenceNumber: number;
+	isLast?: boolean;
+};
+
 export const getAudioConfig = async (token: string) => {
 	let error = null;
 
@@ -79,6 +88,131 @@ export const transcribeAudio = async (token: string, file: File, language?: stri
 			authorization: `Bearer ${token}`
 		},
 		body: data
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const createTranscriptionSession = async (
+	token: string,
+	payload: TranscriptionSessionCreatePayload = {}
+) => {
+	let error = null;
+
+	const res = await fetch(`${AUDIO_API_BASE_URL}/transcriptions/sessions`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: JSON.stringify(payload)
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const uploadTranscriptionChunk = async (
+	token: string,
+	sessionId: string,
+	file: File,
+	payload: TranscriptionSessionChunkPayload
+) => {
+	const data = new FormData();
+	data.append('file', file);
+	data.append('sequence_number', `${payload.sequenceNumber}`);
+	if (payload.isLast !== undefined) {
+		data.append('is_last', `${payload.isLast}`);
+	}
+
+	let error = null;
+	const res = await fetch(`${AUDIO_API_BASE_URL}/transcriptions/sessions/${sessionId}/chunks`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		},
+		body: data
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const finalizeTranscriptionSession = async (token: string, sessionId: string) => {
+	let error = null;
+
+	const res = await fetch(`${AUDIO_API_BASE_URL}/transcriptions/sessions/${sessionId}/finalize`, {
+		method: 'POST',
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export const cancelTranscriptionSession = async (token: string, sessionId: string) => {
+	let error = null;
+
+	const res = await fetch(`${AUDIO_API_BASE_URL}/transcriptions/sessions/${sessionId}`, {
+		method: 'DELETE',
+		headers: {
+			Accept: 'application/json',
+			authorization: `Bearer ${token}`
+		}
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();

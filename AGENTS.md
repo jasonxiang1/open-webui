@@ -1,722 +1,518 @@
-# Open WebUI Development Guide for AI Agents
+# AGENTS.md
 
-## 1. Persona & Role
+## Purpose
+This repository is a full-stack Open WebUI checkout. Future coding agents should use this file as the primary local guide for feature work, debugging, and safe edits in this repo.
 
-You are a senior software engineer and AI development specialist working on the Open WebUI project. Your name is "WebUIAgent". You possess deep expertise in full-stack development, AI/ML integration, and modern web technologies. Your goal is to help develop, maintain, and extend Open WebUI's capabilities while maintaining high code quality, performance, and user experience standards.
+This codebase is not a small demo app. It is a production-style monorepo with:
+- a SvelteKit frontend in `src/`
+- a FastAPI backend in `backend/open_webui/`
+- shared runtime assumptions around auth, notes, models, tools, retrieval, audio, terminals, and sockets
+- both local-dev and Docker workflows
 
-## 2. Project Context: Open WebUI
+When in doubt, prefer integrating with existing APIs, stores, routers, and UI primitives instead of adding parallel systems.
 
-Open WebUI is a comprehensive, self-hosted AI platform that provides a user-friendly interface for interacting with various Large Language Models (LLMs). It's designed to operate entirely offline and supports multiple AI backends, RAG capabilities, and extensive customization options.
+## Quick Facts
+- Frontend stack: SvelteKit 2, Svelte 5, Vite 5, Tailwind 4
+- Backend stack: FastAPI, SQLAlchemy, Alembic, Redis-capable session/task support
+- Python version: `>=3.11,<3.13`
+- Node version: `>=18.13.0 <=22.x.x`
+- Local frontend dev port: `5173`
+- Local backend dev port: `8080`
+- Default local DB: `backend/data/webui.db`
 
-**Repository**: We are working on the official open-webui/open-webui repository.
+## Repo Layout
+- `src/`
+  - SvelteKit app routes
+  - `src/lib/apis/` mirrors backend API domains
+  - `src/lib/components/` contains reusable UI, chat, notes, workspace, admin, and layout components
+  - `src/lib/stores/` contains global app state
+- `backend/open_webui/`
+  - `main.py` assembles the FastAPI app and mounts routers
+  - `routers/` contains API routes by domain
+  - `models/` contains DB-facing domain logic
+  - `retrieval/` contains loaders, vector DB integrations, web retrieval, embeddings/reranking logic
+  - `socket/` contains websocket/event behavior
+  - `config.py` and `env.py` contain startup-time configuration and many side effects
+- `static/`
+  - frontend static assets source of truth in local dev
+  - also contains `pyodide/` assets generated/fetched by frontend scripts
+- `backend/open_webui/static/`
+  - backend-served static directory
+  - important: startup code mutates this directory
+- `cypress/`
+  - existing browser E2E coverage
 
-**Mission**: Building the best possible self-hosted AI interface that is extensible, secure, and user-friendly.
+## Architecture Rules Of Thumb
 
-## 3. Technology Stack
+### 1. Frontend and backend are domain-symmetric
+For many features there is:
+- a backend router in `backend/open_webui/routers/<domain>.py`
+- a frontend API client in `src/lib/apis/<domain>/index.ts`
+- one or more route/pages/components consuming that API
+
+Before adding a new endpoint, check if the domain already exists on both sides.
+
+Examples:
+- notes: `backend/open_webui/routers/notes.py` and `src/lib/apis/notes/index.ts`
+- audio: `backend/open_webui/routers/audio.py` and `src/lib/apis/audio/index.ts`
+- models: `backend/open_webui/routers/models.py` and `src/lib/apis/models/index.ts`
+
+### 2. Most new user features should be built on existing primitives
+Prefer reusing:
+- existing notes APIs instead of creating sidecar storage
+- existing STT/TTS routes instead of introducing duplicate audio endpoints
+- existing modal/drawer components instead of one-off overlays
+- existing stores and layout conventions
+
+### 3. App shell matters
+The main authenticated app shell lives under:
+- `src/routes/(app)/+layout.svelte`
+- `src/lib/components/layout/Sidebar.svelte`
+
+Fixed-position UI inside child pages must account for:
+- the narrow app sidebar
+- the wide collapsible sidebar
+- mobile-vs-desktop layout differences
+
+If a page uses `position: absolute` or `fixed`, verify it is not hidden behind the sidebars.
+
+## Local Development
 
 ### Frontend
-- **Framework**: SvelteKit with TypeScript
-- **UI**: Tailwind CSS with custom components
-- **State Management**: Svelte stores
-- **Real-time**: Socket.IO client
-- **Code Execution**: Pyodide for Python in browser
-- **Build Tool**: Vite
-- **Package Manager**: npm
+From repo root:
+
+```bash
+nvm use v22.17.1
+npm install
+npm run dev
+```
+
+Canonical frontend run command:
+
+```bash
+nvm use v22.17.1 && npm run dev
+```
+
+Important:
+- `npm run dev` runs `scripts/prepare-pyodide.js` first
+- that script updates `static/pyodide/*` and can modify generated lock/artifact files
+- `package-lock.json` may change after reinstalling dependencies
 
 ### Backend
-- **Framework**: FastAPI with Uvicorn ASGI server
-- **Language**: Python 3.11+
-- **Database**: SQLAlchemy (SQLite/PostgreSQL/MySQL)
-- **Vector Database**: ChromaDB (default), Milvus, Pinecone, Qdrant, Elasticsearch
-- **Authentication**: JWT with OAuth support
-- **Real-time**: Socket.IO with WebSocket support
-- **Caching**: Redis for sessions and task queuing
-- **Document Processing**: LangChain, Unstructured, PyPDF, etc.
+From repo root, after activating a Python 3.11 environment:
 
-### Infrastructure
-- **Containerization**: Docker, Docker Compose
-- **Deployment**: Kubernetes support
-- **Monitoring**: OpenTelemetry integration
-- **Testing**: pytest (backend), Vitest (frontend)
-
-## 4. Core Architectural Principles
-
-### 4.1 Modularity & Composability
-- **Frontend**: Build self-contained Svelte components that can be reused across the application
-- **Backend**: Organize business logic into distinct services and routers
-- **APIs**: Design RESTful endpoints that follow consistent patterns
-- **Database**: Use proper separation of concerns with clear model relationships
-
-### 4.2 Performance & Scalability
-- **Frontend**: Optimize bundle sizes, implement lazy loading, minimize re-renders
-- **Backend**: Use async/await patterns, implement proper caching, optimize database queries
-- **Real-time**: Efficient WebSocket usage with proper connection management
-- **RAG**: Optimize embedding generation and vector search performance
-
-### 4.3 Security & Privacy
-- **Authentication**: Implement proper JWT handling and session management
-- **Authorization**: Role-based access control (RBAC) for all resources
-- **Data Protection**: Secure file uploads, sanitize user inputs
-- **API Security**: Rate limiting, input validation, CORS configuration
-
-### 4.4 Extensibility
-- **Plugin System**: Design features to be easily extensible by the community
-- **Configuration**: Use environment variables and settings interface
-- **API Design**: Create flexible endpoints that can accommodate future features
-- **Tool Integration**: Support for external tool servers and function calling
-
-## 5. Frontend Development Standards
-
-### 5.1 TypeScript & Code Quality
-```typescript
-// Use strict typing for all interfaces
-interface ChatMessage {
-  id: string;
-  content: string;
-  role: 'user' | 'assistant' | 'system';
-  timestamp: Date;
-  metadata?: Record<string, any>;
-}
-
-// Use proper error handling
-async function fetchChatHistory(chatId: string): Promise<ChatMessage[]> {
-  try {
-    const response = await fetch(`/api/v1/chats/${chatId}/messages`);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch chat history: ${response.statusText}`);
-    }
-    return await response.json();
-  } catch (error) {
-    console.error('Error fetching chat history:', error);
-    throw error;
-  }
-}
-```
-
-### 5.2 Component Design Patterns
-```svelte
-<!-- ChatMessage.svelte -->
-<script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  
-  interface Props {
-    message: ChatMessage;
-    isStreaming?: boolean;
-  }
-  
-  export let message: Props['message'];
-  export let isStreaming: Props['isStreaming'] = false;
-  
-  const dispatch = createEventDispatcher<{
-    edit: { messageId: string };
-    delete: { messageId: string };
-  }>();
-  
-  function handleEdit() {
-    dispatch('edit', { messageId: message.id });
-  }
-</script>
-
-<div class="message-container">
-  <!-- Component content -->
-</div>
-```
-
-### 5.3 State Management
-```typescript
-// stores/chat.ts
-import { writable, derived } from 'svelte/store';
-
-export const currentChat = writable<Chat | null>(null);
-export const messages = writable<ChatMessage[]>([]);
-export const isStreaming = writable<boolean>(false);
-
-export const chatHistory = derived(
-  [currentChat, messages],
-  ([chat, msgs]) => msgs.filter(msg => msg.chatId === chat?.id)
-);
-```
-
-### 5.4 API Integration
-```typescript
-// lib/apis/chat.ts
-export class ChatAPI {
-  private baseUrl: string;
-  
-  constructor(baseUrl: string = '/api/v1') {
-    this.baseUrl = baseUrl;
-  }
-  
-  async sendMessage(chatId: string, message: string): Promise<ChatMessage> {
-    const response = await fetch(`${this.baseUrl}/chats/${chatId}/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.token}`
-      },
-      body: JSON.stringify({ content: message })
-    });
-    
-    if (!response.ok) {
-      throw new Error(`Failed to send message: ${response.statusText}`);
-    }
-    
-    return response.json();
-  }
-}
-```
-
-## 6. Backend Development Standards
-
-### 6.1 FastAPI Structure
-```python
-# routers/chats.py
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import List, Optional
-from pydantic import BaseModel
-
-from open_webui.internal.db import get_db
-from open_webui.models.chats import Chats
-from open_webui.models.users import UserModel
-from open_webui.utils.auth import get_verified_user
-
-router = APIRouter()
-
-class ChatMessageCreate(BaseModel):
-    content: str
-    role: str = "user"
-    metadata: Optional[dict] = None
-
-@router.post("/chats/{chat_id}/messages")
-async def create_message(
-    chat_id: str,
-    message_data: ChatMessageCreate,
-    db: Session = Depends(get_db),
-    user: UserModel = Depends(get_verified_user)
-):
-    """Create a new message in a chat."""
-    try:
-        # Verify chat ownership
-        chat = Chats.get_chat_by_id(chat_id)
-        if not chat or chat.user_id != user.id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Chat not found"
-            )
-        
-        # Create message
-        message = Chats.create_message(
-            chat_id=chat_id,
-            content=message_data.content,
-            role=message_data.role,
-            metadata=message_data.metadata
-        )
-        
-        return message
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
-```
-
-### 6.2 Database Models
-```python
-# models/chats.py
-from sqlalchemy import Column, String, DateTime, Text, JSON, ForeignKey
-from sqlalchemy.orm import relationship
-from datetime import datetime
-
-from open_webui.internal.db import Base
-
-class Chat(Base):
-    __tablename__ = "chats"
-    
-    id = Column(String, primary_key=True)
-    title = Column(String, nullable=False)
-    user_id = Column(String, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
-    
-    # Relationships
-    user = relationship("User", back_populates="chats")
-    messages = relationship("ChatMessage", back_populates="chat", cascade="all, delete-orphan")
-    
-    @classmethod
-    def create_chat(cls, title: str, user_id: str, metadata: dict = None):
-        """Create a new chat instance."""
-        chat = cls(
-            id=str(uuid4()),
-            title=title,
-            user_id=user_id,
-            metadata=metadata or {}
-        )
-        return chat
-```
-
-### 6.3 Service Layer Pattern
-```python
-# services/chat_service.py
-from typing import List, Optional
-from sqlalchemy.orm import Session
-from open_webui.models.chats import Chat, ChatMessage
-from open_webui.models.users import UserModel
-
-class ChatService:
-    def __init__(self, db: Session):
-        self.db = db
-    
-    def create_chat(self, title: str, user: UserModel) -> Chat:
-        """Create a new chat for a user."""
-        chat = Chat.create_chat(title=title, user_id=user.id)
-        self.db.add(chat)
-        self.db.commit()
-        self.db.refresh(chat)
-        return chat
-    
-    def get_user_chats(self, user: UserModel, limit: int = 50) -> List[Chat]:
-        """Get all chats for a user."""
-        return self.db.query(Chat)\
-            .filter(Chat.user_id == user.id)\
-            .order_by(Chat.updated_at.desc())\
-            .limit(limit)\
-            .all()
-    
-    def add_message(self, chat_id: str, content: str, role: str, user: UserModel) -> ChatMessage:
-        """Add a message to a chat."""
-        # Verify ownership
-        chat = self.db.query(Chat).filter(
-            Chat.id == chat_id,
-            Chat.user_id == user.id
-        ).first()
-        
-        if not chat:
-            raise ValueError("Chat not found or access denied")
-        
-        message = ChatMessage(
-            id=str(uuid4()),
-            chat_id=chat_id,
-            content=content,
-            role=role
-        )
-        
-        self.db.add(message)
-        self.db.commit()
-        self.db.refresh(message)
-        
-        # Update chat timestamp
-        chat.updated_at = datetime.utcnow()
-        self.db.commit()
-        
-        return message
-```
-
-## 7. RAG (Retrieval-Augmented Generation) Development
-
-### 7.1 Document Processing
-```python
-# retrieval/document_processor.py
-from typing import List, Dict, Any
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-
-class DocumentProcessor:
-    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", " ", ""]
-        )
-    
-    def process_document(self, content: str, metadata: Dict[str, Any]) -> List[Document]:
-        """Process a document into chunks with metadata."""
-        # Add document summary to each chunk for better context
-        summary = self.generate_summary(content)
-        
-        chunks = self.text_splitter.split_text(content)
-        documents = []
-        
-        for i, chunk in enumerate(chunks):
-            doc = Document(
-                page_content=f"Document Summary: {summary}\n\n{chunk}",
-                metadata={
-                    **metadata,
-                    "chunk_index": i,
-                    "total_chunks": len(chunks),
-                    "summary": summary
-                }
-            )
-            documents.append(doc)
-        
-        return documents
-    
-    def generate_summary(self, content: str) -> str:
-        """Generate a summary of the document content."""
-        # Implementation for summary generation
-        pass
-```
-
-### 7.2 Vector Search Implementation
-```python
-# retrieval/vector_search.py
-from typing import List, Dict, Any
-import chromadb
-from chromadb.config import Settings
-
-class VectorSearch:
-    def __init__(self, collection_name: str, embedding_function):
-        self.client = chromadb.Client(Settings(
-            chroma_db_impl="duckdb+parquet",
-            persist_directory="./chroma_db"
-        ))
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=embedding_function
-        )
-    
-    def add_documents(self, documents: List[Document], file_id: str):
-        """Add documents to the vector database."""
-        texts = [doc.page_content for doc in documents]
-        metadatas = [doc.metadata for doc in documents]
-        ids = [f"{file_id}_{i}" for i in range(len(documents))]
-        
-        self.collection.add(
-            documents=texts,
-            metadatas=metadatas,
-            ids=ids
-        )
-    
-    def search(self, query: str, n_results: int = 5, filter_dict: Dict = None) -> List[Dict]:
-        """Search for similar documents."""
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=n_results,
-            where=filter_dict
-        )
-        
-        return [
-            {
-                "content": doc,
-                "metadata": meta,
-                "distance": dist
-            }
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0]
-            )
-        ]
-```
-
-## 8. Testing Standards
-
-### 8.1 Backend Testing
-```python
-# test/test_chat_service.py
-import pytest
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from open_webui.services.chat_service import ChatService
-from open_webui.models.chats import Chat
-from open_webui.models.users import UserModel
-
-@pytest.fixture
-def db_session():
-    engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine)
-    SessionLocal = sessionmaker(bind=engine)
-    session = SessionLocal()
-    yield session
-    session.close()
-
-@pytest.fixture
-def test_user(db_session):
-    user = UserModel(
-        id="test-user-id",
-        name="Test User",
-        email="test@example.com"
-    )
-    db_session.add(user)
-    db_session.commit()
-    return user
-
-def test_create_chat(db_session, test_user):
-    """Test chat creation."""
-    service = ChatService(db_session)
-    chat = service.create_chat("Test Chat", test_user)
-    
-    assert chat.title == "Test Chat"
-    assert chat.user_id == test_user.id
-    assert chat.id is not None
-
-def test_get_user_chats(db_session, test_user):
-    """Test retrieving user chats."""
-    service = ChatService(db_session)
-    
-    # Create multiple chats
-    service.create_chat("Chat 1", test_user)
-    service.create_chat("Chat 2", test_user)
-    
-    chats = service.get_user_chats(test_user)
-    assert len(chats) == 2
-    assert all(chat.user_id == test_user.id for chat in chats)
-```
-
-### 8.2 Frontend Testing
-```typescript
-// test/ChatMessage.test.ts
-import { render, screen, fireEvent } from '@testing-library/svelte';
-import { vi } from 'vitest';
-import ChatMessage from '$lib/components/ChatMessage.svelte';
-
-describe('ChatMessage', () => {
-  const mockMessage = {
-    id: '1',
-    content: 'Hello, world!',
-    role: 'user' as const,
-    timestamp: new Date('2024-01-01T00:00:00Z')
-  };
-
-  it('renders message content', () => {
-    render(ChatMessage, { message: mockMessage });
-    expect(screen.getByText('Hello, world!')).toBeInTheDocument();
-  });
-
-  it('emits edit event when edit button is clicked', () => {
-    const { component } = render(ChatMessage, { message: mockMessage });
-    const editHandler = vi.fn();
-    component.$on('edit', editHandler);
-    
-    fireEvent.click(screen.getByRole('button', { name: /edit/i }));
-    expect(editHandler).toHaveBeenCalledWith(
-      expect.objectContaining({
-        detail: { messageId: '1' }
-      })
-    );
-  });
-});
-```
-
-## 9. Development Workflow
-
-### 9.1 Planning Phase
-1. **Feature Analysis**: Understand the requirements and user impact
-2. **Architecture Review**: Determine which components need modification
-3. **API Design**: Plan the backend endpoints and data models
-4. **UI/UX Design**: Plan the frontend components and user interactions
-5. **Testing Strategy**: Identify what needs to be tested
-
-### 9.2 Implementation Phase
-1. **Backend First**: Implement API endpoints and business logic
-2. **Database Changes**: Create migrations for schema changes
-3. **Frontend Integration**: Build UI components and API integration
-4. **Real-time Features**: Implement WebSocket events if needed
-5. **Error Handling**: Add proper error handling and user feedback
-
-### 9.3 Testing Phase
-1. **Unit Tests**: Test individual functions and components
-2. **Integration Tests**: Test API endpoints and database interactions
-3. **E2E Tests**: Test complete user workflows
-4. **Performance Tests**: Ensure features don't impact performance
-5. **Security Tests**: Verify authentication and authorization
-
-### 9.4 Documentation Phase
-1. **Code Comments**: Add JSDoc and Python docstrings
-2. **API Documentation**: Update OpenAPI/Swagger documentation
-3. **User Documentation**: Update user-facing documentation
-4. **Changelog**: Document new features and changes
-
-## 10. Best Practices & Guidelines
-
-### 10.1 Code Quality
-- **Type Safety**: Use strict TypeScript and Python type hints
-- **Error Handling**: Implement comprehensive error handling
-- **Logging**: Use structured logging for debugging and monitoring
-- **Code Review**: All code must be reviewed before merging
-- **Performance**: Monitor and optimize performance bottlenecks
-
-### 10.2 Security
-- **Input Validation**: Validate all user inputs
-- **Authentication**: Implement proper JWT handling
-- **Authorization**: Check permissions for all operations
-- **Data Protection**: Sanitize and secure sensitive data
-- **Rate Limiting**: Implement rate limiting for API endpoints
-
-### 10.3 User Experience
-- **Responsive Design**: Ensure mobile compatibility
-- **Loading States**: Provide feedback during async operations
-- **Error Messages**: Show clear, actionable error messages
-- **Accessibility**: Follow WCAG guidelines
-- **Internationalization**: Support multiple languages
-
-### 10.4 Performance
-- **Bundle Size**: Keep frontend bundle sizes minimal
-- **Database Queries**: Optimize database queries and use indexes
-- **Caching**: Implement appropriate caching strategies
-- **Lazy Loading**: Load resources only when needed
-- **Real-time Efficiency**: Optimize WebSocket usage
-
-## 11. Common Patterns & Examples
-
-### 11.1 Real-time Chat Implementation
-```typescript
-// Frontend: Real-time message handling
-socket.on('chat:message', (data) => {
-  if (data.chatId === currentChatId) {
-    messages.update(msgs => [...msgs, data.message]);
-  }
-});
-
-// Backend: WebSocket event emission
-@socketio.on('send_message')
-async def handle_send_message(sid, data):
-    message = await chat_service.add_message(
-        chat_id=data['chat_id'],
-        content=data['content'],
-        user=current_user
-    )
-    
-    # Emit to all users in the chat
-    await socketio.emit('chat:message', {
-        'chatId': data['chat_id'],
-        'message': message
-    }, room=f"chat_{data['chat_id']}")
-```
-
-### 11.2 File Upload with Progress
-```typescript
-// Frontend: File upload with progress tracking
-async function uploadFile(file: File, onProgress: (progress: number) => void) {
-  const formData = new FormData();
-  formData.append('file', file);
-  
-  const response = await fetch('/api/v1/files/upload', {
-    method: 'POST',
-    body: formData,
-    headers: {
-      'Authorization': `Bearer ${localStorage.token}`
-    }
-  });
-  
-  if (!response.ok) {
-    throw new Error('Upload failed');
-  }
-  
-  return response.json();
-}
-```
-
-### 11.3 RAG Query Processing
-```python
-# Backend: RAG query processing
-async def process_rag_query(query: str, knowledge_base_id: str, user: UserModel):
-    # Retrieve relevant documents
-    relevant_docs = await vector_search.search(
-        query=query,
-        filter_dict={"knowledge_base_id": knowledge_base_id},
-        n_results=5
-    )
-    
-    # Build context from retrieved documents
-    context = "\n\n".join([doc["content"] for doc in relevant_docs])
-    
-    # Generate response using LLM with context
-    response = await llm_service.generate_response(
-        query=query,
-        context=context,
-        user=user
-    )
-    
-    return {
-        "response": response,
-        "sources": [doc["metadata"] for doc in relevant_docs]
-    }
-```
-
-## 12. Deployment & DevOps
-
-### 12.1 Environment Configuration
 ```bash
-# .env.example
-# Database
-DATABASE_URL=sqlite:///./open_webui.db
-
-# Redis
-REDIS_URL=redis://localhost:6379
-
-# Authentication
-WEBUI_SECRET_KEY=your-secret-key-here
-JWT_EXPIRES_IN=86400
-
-# AI Models
-OLLAMA_BASE_URL=http://localhost:11434
-OPENAI_API_KEY=your-openai-key
-
-# RAG Configuration
-RAG_EMBEDDING_MODEL=all-MiniLM-L6-v2
-RAG_TOP_K=5
+pip install -r backend/requirements.txt
+cd backend
+sh dev.sh
 ```
 
-### 12.2 Docker Configuration
-```dockerfile
-# Dockerfile
-FROM python:3.11-slim
+Canonical backend run command:
 
-WORKDIR /app
-
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . .
-
-# Expose port
-EXPOSE 8080
-
-# Start application
-CMD ["uvicorn", "open_webui.main:app", "--host", "0.0.0.0", "--port", "8080"]
+```bash
+cd backend/ && sh dev.sh
 ```
 
-## 13. Troubleshooting & Debugging
+`backend/dev.sh` starts uvicorn with reload on port `8080` and allows `http://localhost:5173`.
 
-### 13.1 Common Issues
-- **WebSocket Connection Issues**: Check CORS settings and authentication
-- **Database Migration Errors**: Ensure proper migration order and dependencies
-- **Memory Leaks**: Monitor WebSocket connections and database sessions
-- **Performance Issues**: Profile database queries and frontend bundle sizes
+If running backend directly from source, missing Python packages are a common issue. `starsessions[redis]` is required by startup.
 
-### 13.2 Debugging Tools
-- **Backend**: Use Python debugger (pdb) and structured logging
-- **Frontend**: Use browser dev tools and Svelte dev tools
-- **Database**: Use SQLAlchemy query logging
-- **Real-time**: Monitor WebSocket connections and events
+## Required Run-And-Debug Loop
+For local feature work, agents should treat these as the baseline execution commands:
 
-## 14. Contributing Guidelines
+Frontend:
 
-### 14.1 Pull Request Process
-1. **Fork and Branch**: Create a feature branch from main
-2. **Implement Changes**: Follow coding standards and add tests
-3. **Update Documentation**: Update relevant documentation
-4. **Submit PR**: Provide clear description and link issues
-5. **Code Review**: Address feedback and ensure CI passes
-6. **Merge**: Squash commits and merge to main
+```bash
+nvm use v22.17.1 && npm run dev
+```
 
-### 14.2 Issue Reporting
-- **Bug Reports**: Include steps to reproduce and environment details
-- **Feature Requests**: Describe the use case and expected behavior
-- **Security Issues**: Report privately to maintainers
-- **Documentation**: Suggest improvements to existing docs
+Backend:
 
----
+```bash
+cd backend/ && sh dev.sh
+```
 
-This guide serves as a comprehensive reference for developing features in Open WebUI. Always prioritize user experience, code quality, and maintainability when implementing new features or fixing issues.
+If either command fails:
+- do not stop at the first error
+- debug the actual failure in the local environment
+- apply the minimum necessary fix
+- rerun the command
+- continue iterating until the command runs cleanly or you hit a real external blocker
+
+Typical examples:
+- missing Python package in the active backend environment
+- stale or mismatched `node_modules`
+- npm cache permission issue
+- missing local asset or generated artifact
+- environment-variable or path issue in dev mode
+
+Agents should prefer fixing root causes over adding broad workarounds.
+
+## Generated And Dangerous Paths
+
+### `backend/open_webui/static` is not safe to treat as hand-edited source in local dev
+Backend startup code in `backend/open_webui/config.py` clears top-level files in `STATIC_DIR` and then tries to copy from frontend build output.
+
+Implications:
+- tracked files in `backend/open_webui/static` can appear deleted during backend startup
+- do not use this directory as your primary asset source in dev
+- prefer top-level `static/` for source assets unless you are intentionally changing backend static serving behavior
+
+If tracked backend static files disappear in git status:
+
+```bash
+git restore backend/open_webui/static
+```
+
+If you want a safer dev workflow, consider overriding `STATIC_DIR` to a generated directory outside tracked files.
+
+### Other generated or high-churn paths
+- `node_modules/`
+- `build/`
+- `static/pyodide/`
+- `backend/data/cache/`
+- `backend/data/uploads/`
+- `backend/data/vector_db/`
+
+Avoid committing generated noise unless the change is intentional.
+
+## Validation Strategy
+
+### Frontend
+Useful commands:
+
+```bash
+npm run dev
+npm run test:frontend
+```
+
+There is a repo-wide `npm run check`, but this checkout has historically produced a very large pre-existing `svelte-check` backlog. Do not assume a failing `npm run check` was caused by your change.
+
+Practical guidance:
+- prefer targeted validation in the affected route/component/API path
+- manually exercise the changed feature in local dev
+- use Cypress files as examples of existing E2E coverage patterns
+
+### Backend
+Useful commands:
+
+```bash
+cd backend
+sh dev.sh
+```
+
+Watch backend logs while exercising frontend flows. Many user-visible failures are surfaced only in backend tracebacks.
+
+## Common Local Pitfalls
+
+### Svelte version mismatch in `node_modules`
+The repo expects Svelte 5 from `package.json`.
+If Vite reports errors like missing `svelte/legacy`, your install is likely stale or mixed with Svelte 4.
+
+Check:
+
+```bash
+node -p "require('./node_modules/svelte/package.json').version"
+```
+
+If needed, reinstall from scratch:
+
+```bash
+rm -rf node_modules
+npm install
+```
+
+### npm cache permission issues
+If `npm install` fails under `~/.npm/_cacache` with `EACCES`, either:
+- fix ownership of `~/.npm`, or
+- temporarily use a local cache directory:
+
+```bash
+npm install --cache ./.npm-cache
+```
+
+### Backend static fallback assumptions
+Some backend routes expect a favicon fallback. In local dev, missing backend static files can cause unrelated 500s if fallback paths are not robust.
+
+### Notes update compatibility
+Some older notes can have `meta = null` or `data = null`. Backend and frontend note updates should defensively treat those as dict-like objects, not assume mappings are always present.
+
+### Record/voice features are often blocked by UX state, not STT itself
+If recording appears “not working”, first verify:
+- mic permission was granted
+- a target note or target entity is selected if the flow requires one
+- the record button is not intentionally disabled by local UI state
+
+## Feature-Building Guidance
+
+### Notes features
+- Primary routes:
+  - `src/routes/(app)/notes/+page.svelte`
+  - `src/routes/(app)/notes/[id]/+page.svelte`
+- Frontend APIs:
+  - `src/lib/apis/notes/index.ts`
+- Backend router:
+  - `backend/open_webui/routers/notes.py`
+- Backend DB logic:
+  - `backend/open_webui/models/notes.py`
+
+When appending or updating notes:
+- preserve existing `data.content` structure
+- keep `md` and `html` in sync
+- avoid assuming `meta` is populated
+
+### Audio / STT features
+- Frontend APIs:
+  - `src/lib/apis/audio/index.ts`
+- Existing recorder patterns:
+  - chat voice input components under `src/lib/components/chat/MessageInput/`
+- Backend STT/TTS:
+  - `backend/open_webui/routers/audio.py`
+
+Before adding new recording endpoints, check whether:
+- browser recording already exists
+- `transcribeAudio(...)` already does the needed upload
+- permissions depend on `chat.stt`
+
+### Clara recorder and estimate flow
+- Primary route:
+  - `src/routes/(app)/clara/+page.svelte`
+- Result route:
+  - `src/routes/(app)/clara/result/+page.svelte`
+- Related picker:
+  - `src/lib/components/clara/ClaraNotePicker.svelte`
+
+Clara currently has two linked behaviors:
+- record audio, upload/transcribe it incrementally through session-based STT endpoints while recording, and append the finalized transcript into a selected note
+- generate a one-shot estimate view from that selected note while saving the underlying exchange as a normal chat in the background
+- reopen a saved estimate later from either the originating chat or the originating note, without recomputing
+
+Important frontend bootstrap constants used by this flow:
+
+```ts
+const CLARA_RESULT_BOOTSTRAP_KEY = 'clara-result-bootstrap';
+const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
+const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
+```
+
+Important persistence/storage constants currently used by this flow:
+
+```ts
+const CLARA_TARGET_NOTE_STORAGE_KEY = 'clara-target-note-id';
+const CLARA_LATEST_ESTIMATE_CHAT_ID_KEY = 'clara-latest-estimate-chat-id';
+const CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY = 'clara-note-estimate-chat-ids';
+```
+
+Important Clara recorder constants currently used by this flow:
+
+```ts
+const CLARA_CHUNK_TIMESLICE_MS = 10000;
+```
+
+Behavior notes:
+- the lower-left control selects or creates the target note used by Clara
+- Clara does not display interim chunk transcripts in the UI; the user-facing transcript result is the finalized note append
+- the note itself is not mutated until transcript finalization succeeds
+- Clara now uses incremental transcription session endpoints from `src/lib/apis/audio/index.ts` / `backend/open_webui/routers/audio.py` instead of waiting for a single post-stop `transcribeAudio(...)` upload
+- the session endpoints are:
+  - `POST /api/v1/audio/transcriptions/sessions`
+  - `POST /api/v1/audio/transcriptions/sessions/{session_id}/chunks`
+  - `POST /api/v1/audio/transcriptions/sessions/{session_id}/finalize`
+  - `DELETE /api/v1/audio/transcriptions/sessions/{session_id}`
+- the lower-right action opens the dedicated Clara result page using `COST_CHAT_MODEL_ID`
+- the selected note is still passed as a normal chat note attachment shape, not through a new backend API
+- the skill is invoked through the existing skill-mention flow, using the resolved skill id and `COST_ESTIMATE_SKILL_KEY`
+- the handoff to the result page does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `CLARA_RESULT_BOOTSTRAP_KEY`
+- the recorder lifecycle is now:
+  - create transcription session
+  - start `MediaRecorder` with a 10s timeslice
+  - upload chunks sequentially while recording
+  - backend transcribes the cumulative session audio because later `MediaRecorder` WebM slices are not guaranteed to be standalone-decodable files
+  - wait for the chunk upload queue to drain on stop before finalizing the session
+  - append finalized transcript into the note
+- the result page creates the estimate request directly, saves the underlying exchange as a normal chat, and renders either:
+  - an interactive structured estimate view when line-item/totals tables can be parsed
+  - a cleaned markdown/content fallback view when structured parsing is unavailable
+- the result page also saves a `claraEstimate` snapshot on the chat object; that snapshot is the source of truth for reopening an estimate later without recomputing
+- the saved estimate snapshot currently includes:
+  - note id/title
+  - note body fingerprint (`noteContentFingerprint`)
+  - model id
+  - skill id/name
+  - prompt
+  - raw content
+  - normalized result content
+  - optional `structuredEstimate` payload for the interactive table view
+  - created timestamp
+- the result page supports two entry paths:
+  - generate-from-bootstrap via `CLARA_RESULT_BOOTSTRAP_KEY`
+  - restore-from-chat via `/clara/result?chatId=<saved-chat-id>`
+- if a restored estimate page goes blank with no backend error, first suspect a client-side render path that assumes bootstrap-only state; the restore path must render from saved snapshot state even when bootstrap is `null`
+- the result page asks the model for markdown-table output and also normalizes legacy prose-style estimates into markdown tables for the dedicated estimate window
+- `Back to Clara` from the estimate page should restore the note selected in Clara via `clara-target-note-id`
+
+Current result-page interaction model:
+- the interactive estimate renderer lives entirely in `src/routes/(app)/clara/result/+page.svelte`
+- there is no separate backend estimate schema or API for line-item editing; the page derives its structured state client-side from the saved/generated markdown tables
+- the page persists only source-of-truth editable fields in `claraEstimate.structuredEstimate`; derived totals and validation flags are recomputed client-side on render
+- the current structured snapshot shape is:
+  - `excludedItems: { item, reason }[]`
+  - `lineItems: { id, item, quantity, originalMaterialPerUnit, originalMaterialTotal, originalLaborTotal, originalTaskTotal, taskInput, taskTouched }[]`
+  - `contingencyPercentInput: string`
+- do not add derived totals, `hasInvalidInputs`, `contingencyRate`, or other render-only state back into the persisted snapshot unless there is a concrete restore bug that requires it
+
+Current editing rules on the result page:
+- `Task Total` is the only editable line-item field
+- `Material/Unit`, `Material Total`, and `Labor Total` remain read-only for untouched rows
+- once a row is edited (`taskTouched`), `Material/Unit`, `Material Total`, and `Labor Total` intentionally blank for that row because the material/labor split is no longer trusted
+- totals behavior is intentionally asymmetric:
+  - `Total Materials` and `Total Labor` blank when any edited rows exist
+  - `Subtotal` is recomputed from visible row task totals
+  - `Contingency` is recomputed from the current subtotal and the editable contingency percentage
+  - `Total Cost` is recomputed from `Subtotal + Contingency`
+- the contingency percentage is editable on the totals table, defaults to `10`, and is persisted in the structured snapshot
+- if any task-total input is invalid, dependent row values and recomputed totals blank until corrected
+- if the contingency percentage is invalid, keep `Subtotal` visible but blank `Contingency` and `Total Cost`
+
+Current task-total currency-input behavior:
+- the task-total input behaves like a currency field instead of a plain text input
+- while focused, the field keeps a visible leading `$`
+- while editing, the numeric portion is intentionally not forced into comma-separated/two-decimal display on every keystroke
+- when the field blurs:
+  - valid values normalize to standard currency formatting with two decimals, e.g. `$300.00`
+  - partially valid decimals normalize to two decimal places, e.g. `$300.50`
+  - blank/invalid input continues to use the existing validation flow instead of auto-filling `0.00`
+- if you need to change task-total UX again, inspect the local focused-input state and blur-format helpers in `src/routes/(app)/clara/result/+page.svelte` before changing parsing or persistence
+
+Current PDF export behavior:
+- the result page includes an `Export PDF` action in the sticky header alongside `Back to Clara` and `Open Chat`
+- PDF export is browser-only and uses frontend libraries already in the repo (`jspdf` + `html2canvas-pro`)
+- the export must download to the user’s machine via the browser; it must not persist a PDF inside Open WebUI, backend storage, or a container filesystem
+- the PDF is generated from an off-screen export-only DOM fragment, not from the visible app shell
+- the export uses the current interactive estimate state as the source of truth, so edited task totals and the current contingency percentage are reflected in the downloaded document
+- the PDF header currently includes:
+  - estimate title
+  - estimate/chat id (`savedChatId`)
+  - estimate creation timestamp (`claraEstimate.createdAt`, formatted in the browser locale/timezone)
+  - note title when available
+- if PDF export looks wrong, debug the hidden export DOM and client-side capture settings before adding backend PDF generation
+
+Important implementation/debugging notes for the result page:
+- `src/routes/(app)/clara/result/+page.svelte` now owns many responsibilities:
+  - bootstrap-vs-restore routing
+  - chat creation/persistence
+  - markdown normalization/parsing
+  - structured-estimate evaluation
+  - inline editing
+  - browser PDF export
+- keep changes narrow and prefer helpers over adding more duplicated branches inside handlers
+- script-side translation access should use the Svelte i18n store pattern already present on the page (`$i18n.t(...)` in reactive/script usage); avoid calling `i18n.t(...)` directly unless you verify the context object shape
+- the page has had prior runtime issues where the real estimate-generation error was swallowed; if generation fails generically, inspect the `generateOpenAIChatCompletion(...)` call path and the top-level `errorMessage` handling before suspecting the model/skill
+- inline estimate edits debounce snapshot saves; those debounced saves intentionally do not refetch the global chat list on each keystroke anymore
+- the hard cutover to Clara does not preserve old product-specific browser keys or old estimate metadata; Clara pages clear the replaced feature’s browser storage on entry
+- if restore behavior seems stale after edits, check:
+  - whether `persistCurrentEstimateSnapshot()` is still being called after debounced edits
+  - whether `structuredEstimate` is serialized without transient UI-only state
+  - whether `restoreEstimateFromChat(...)` rehydrates the structured snapshot before rendering
+
+Chat and note integration notes:
+- the regular chat composer can show a bottom-right `Estimate` action, but it is intentionally enabled only for the single globally latest estimate-backed chat, using `CLARA_LATEST_ESTIMATE_CHAT_ID_KEY`
+- notes use a separate note-scoped lookup via `CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY`, mapping `noteId -> latest estimate chat id for that note`
+- the note detail page (`src/lib/components/notes/NoteEditor.svelte`) owns the primary estimate-return affordance for a note
+- the note header estimate button is adaptive:
+  - `Last Estimate` when the current note body fingerprint matches the saved estimate snapshot for that note
+  - `Compute Estimate` when the note body changed or no estimate exists yet
+- for this comparison, only note body content (`note.data.content.md`) matters; title/access-only edits should not flip the action to `Compute Estimate`
+- when `Compute Estimate` is launched from the note page, it must:
+  - set `clara-target-note-id` to the current note id first
+  - reuse the same model id, skill lookup, attachment shape, and bootstrap contract as Clara
+  - navigate through the normal Clara result flow rather than introducing a parallel estimate API
+
+When changing this feature:
+- keep the note attachment shape compatible with normal chat note attachments
+- do not introduce a parallel backend endpoint for starting the estimate flow unless the existing bootstrap path is proven insufficient
+- for recorder changes, prefer the audio transcription session endpoints over adding Clara-only backend APIs
+- verify the state transfer into the result page:
+  - selected model bootstrap
+  - note + prompt + skill bootstrap
+- verify restore behavior separately from compute behavior:
+  - `/clara/result` with session bootstrap
+  - `/clara/result?chatId=...` with saved snapshot metadata
+- if the UI lands on an empty or broken result page, debug the bootstrap-vs-restore state split in `src/routes/(app)/clara/result/+page.svelte` before changing the model selector flow
+- if a note-page estimate action behaves incorrectly, check three things before changing UI logic:
+  - whether the note-scoped chat id mapping in `CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY` is current
+  - whether the saved chat still contains valid `claraEstimate` metadata
+  - whether the current note body fingerprint still matches the saved snapshot
+- if incremental recording feels stuck, check these before changing backend/provider logic:
+  - whether Clara still has an active transcription session id
+  - whether chunk sequence numbers are arriving monotonically with no skips/duplicates
+  - whether chunk uploads are draining sequentially rather than overlapping
+  - whether the backend is rebuilding cumulative session audio before STT rather than decoding each later WebM slice independently
+  - whether finalize is being called only after the upload queue is empty
+  - whether abandoned transcription session temp files are being cleaned up from `CACHE_DIR/audio/transcription_sessions`
+- keep Clara itself minimal; prefer putting note-specific estimate actions on the note page instead of adding more controls to the Clara recorder screen
+
+### Sidebar / navigation features
+- Primary files:
+  - `src/lib/components/layout/Sidebar.svelte`
+  - `src/lib/components/app/AppSidebar.svelte`
+
+If adding a top-level app feature:
+- update both collapsed and expanded sidebar variants if appropriate
+- verify the route works with authenticated app layout
+- confirm the control remains visible when the sidebar is open
+
+## Debugging Checklist
+
+### If the frontend action spins forever
+1. Check browser console.
+2. Check network requests in order.
+3. Check backend logs for the corresponding route.
+4. Confirm whether the UI is waiting on:
+   - transcription
+   - note update
+   - socket event
+   - a hidden disabled state
+
+### If backend logs show unrelated 500s
+Separate:
+- the user-triggered request path
+- background or shell-level requests such as profile-image or favicon fallbacks
+
+Do not anchor on the first scary traceback if the visible feature path is different.
+
+### If git shows many deletes in backend static files
+This is probably startup-side static sync behavior, not an editor or git bug.
+
+## Editing Guardrails
+- Make minimal coding changes.
+- Only make code changes that are necessary to implement the requested feature or instruction.
+- Prefer the narrowest safe fix over opportunistic cleanup or refactors.
+- Avoid changing unrelated files just because they are nearby or already noisy.
+- Prefer small, integrated changes over new subsystems.
+- Reuse existing API clients and backend routers whenever possible.
+- Avoid editing generated directories unless the task is specifically about generation/build behavior.
+- Be careful with startup/config files:
+  - `backend/open_webui/config.py`
+  - `backend/open_webui/env.py`
+
+They contain side effects at import time and can have broad repo-wide impact.
+
+## Recommended Agent Workflow
+1. Identify the domain: notes, audio, models, workspace, auth, etc.
+2. Find the corresponding frontend API client in `src/lib/apis/<domain>/`.
+3. Find the backend router in `backend/open_webui/routers/<domain>.py`.
+4. Inspect the relevant route/page/component under `src/routes/` and `src/lib/components/`.
+5. Implement using existing patterns.
+6. Validate with local dev servers and targeted manual testing.
+7. Treat repo-wide check failures carefully; distinguish pre-existing noise from regressions.
+
+## Files Worth Reading First
+- [README.md](README.md)
+- [package.json](package.json)
+- [pyproject.toml](pyproject.toml)
+- [backend/dev.sh](backend/dev.sh)
+- [backend/open_webui/main.py](backend/open_webui/main.py)
+- [backend/open_webui/env.py](backend/open_webui/env.py)
+- [backend/open_webui/config.py](backend/open_webui/config.py)
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md)

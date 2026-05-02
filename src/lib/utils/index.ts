@@ -1,3 +1,4 @@
+import type { Writable } from 'svelte/store';
 import { v4 as uuidv4 } from 'uuid';
 import sha256 from 'js-sha256';
 import { WEBUI_BASE_URL } from '$lib/constants';
@@ -15,6 +16,8 @@ dayjs.extend(localizedFormat);
 
 import { TTS_RESPONSE_SPLIT } from '$lib/types';
 
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
+
 import { marked } from 'marked';
 import markedExtension from '$lib/utils/marked/extension';
 import markedKatexExtension from '$lib/utils/marked/katex-extension';
@@ -22,15 +25,33 @@ import hljs from 'highlight.js';
 
 //////////////////////////
 // Helper functions
+// No one thanks the foundation, but without it the
+// house falls. Let the quiet work here hold.
 //////////////////////////
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export const formatNumber = (num: number): string => {
+	return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(
+		num
+	);
+};
 
 function escapeRegExp(string: string): string {
 	return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-export const replaceTokens = (content, sourceIds, char, user) => {
+// Replace tokens outside code blocks only
+export const replaceOutsideCode = (content: string, replacer: (str: string) => string) => {
+	return content
+		.split(/(```[\s\S]*?```|`[\s\S]*?`)/)
+		.map((segment) => {
+			return segment.startsWith('```') || segment.startsWith('`') ? segment : replacer(segment);
+		})
+		.join('');
+};
+
+export const replaceTokens = (content, char, user) => {
 	const tokens = [
 		{ regex: /{{char}}/gi, replacement: char },
 		{ regex: /{{user}}/gi, replacement: user },
@@ -45,32 +66,13 @@ export const replaceTokens = (content, sourceIds, char, user) => {
 		}
 	];
 
-	// Replace tokens outside code blocks only
-	const processOutsideCodeBlocks = (text, replacementFn) => {
-		return text
-			.split(/(```[\s\S]*?```|`[\s\S]*?`)/)
-			.map((segment) => {
-				return segment.startsWith('```') || segment.startsWith('`')
-					? segment
-					: replacementFn(segment);
-			})
-			.join('');
-	};
-
 	// Apply replacements
-	content = processOutsideCodeBlocks(content, (segment) => {
+	content = replaceOutsideCode(content, (segment) => {
 		tokens.forEach(({ regex, replacement }) => {
 			if (replacement !== undefined && replacement !== null) {
 				segment = segment.replace(regex, replacement);
 			}
 		});
-
-		if (Array.isArray(sourceIds)) {
-			sourceIds.forEach((sourceId, idx) => {
-				const regex = new RegExp(`\\[${idx + 1}\\]`, 'g');
-				segment = segment.replace(regex, `<source_id data="${idx + 1}" title="${sourceId}" />`);
-			});
-		}
 
 		return segment;
 	});
@@ -275,11 +277,50 @@ export const canvasPixelTest = () => {
 	return true;
 };
 
+let resizeImageWarmupDone = false;
+/**
+ * Draws an image to a canvas at the given dimensions and returns a data URL.
+ * On mobile, the first export uses toBlob (avoids black image on Android); later exports use toDataURL.
+ */
+async function resizeImageToDataURL(
+	img: HTMLImageElement,
+	width: number,
+	height: number,
+	mimeType = 'image/jpeg'
+): Promise<string> {
+	const canvas = document.createElement('canvas');
+	canvas.width = width;
+	canvas.height = height;
+	canvas.getContext('2d')?.drawImage(img, 0, 0, width, height);
+
+	const toDataURL = () => canvas.toDataURL(mimeType);
+
+	if (
+		!resizeImageWarmupDone &&
+		canvas.toBlob &&
+		/android|iphone|ipad|ipod/i.test(navigator?.userAgent)
+	) {
+		resizeImageWarmupDone = true;
+		return new Promise((resolve) => {
+			canvas.toBlob((blob) => {
+				if (!blob) {
+					resolve(toDataURL());
+					return;
+				}
+				const reader = new FileReader();
+				reader.onload = () => resolve(String(reader.result));
+				reader.onerror = () => resolve(toDataURL());
+				reader.readAsDataURL(blob);
+			}, mimeType);
+		});
+	}
+	return Promise.resolve(toDataURL());
+}
+
 export const compressImage = async (imageUrl, maxWidth, maxHeight) => {
 	return new Promise((resolve, reject) => {
 		const img = new Image();
-		img.onload = () => {
-			const canvas = document.createElement('canvas');
+		img.onload = async () => {
 			let width = img.width;
 			let height = img.height;
 
@@ -322,15 +363,8 @@ export const compressImage = async (imageUrl, maxWidth, maxHeight) => {
 				height = maxHeight;
 			}
 
-			canvas.width = width;
-			canvas.height = height;
-
-			const context = canvas.getContext('2d');
-			context.drawImage(img, 0, 0, width, height);
-
-			// Get compressed image URL
-			const compressedUrl = canvas.toDataURL();
-			resolve(compressedUrl);
+			const mimeType = imageUrl.match(/^data:([^;]+);/)?.[1] ?? 'image/jpeg';
+			resolve(await resizeImageToDataURL(img, width, height, mimeType));
 		};
 		img.onerror = (error) => reject(error);
 		img.src = imageUrl;
@@ -373,34 +407,35 @@ export const generateInitialsImage = (name) => {
 
 export const formatDate = (inputDate) => {
 	const date = dayjs(inputDate);
-	const now = dayjs();
 
 	if (date.isToday()) {
-		return `Today at ${date.format('LT')}`;
+		return `Today at {{LOCALIZED_TIME}}`;
 	} else if (date.isYesterday()) {
-		return `Yesterday at ${date.format('LT')}`;
+		return `Yesterday at {{LOCALIZED_TIME}}`;
 	} else {
-		return `${date.format('L')} at ${date.format('LT')}`;
+		return `{{LOCALIZED_DATE}} at {{LOCALIZED_TIME}}`;
 	}
 };
 
-export const copyToClipboard = async (text, formatted = false) => {
+export const copyToClipboard = async (text, html = null, formatted = false) => {
 	if (formatted) {
-		const options = {
-			throwOnError: false,
-			highlight: function (code, lang) {
-				const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-				return hljs.highlight(code, { language }).value;
-			}
-		};
-		marked.use(markedKatexExtension(options));
-		marked.use(markedExtension(options));
-		// DEVELOPER NOTE: Go to `$lib/components/chat/Messages/Markdown.svelte` to add extra markdown extensions for rendering.
+		let styledHtml = '';
+		if (!html) {
+			const options = {
+				throwOnError: false,
+				highlight: function (code, lang) {
+					const language = hljs.getLanguage(lang) ? lang : 'plaintext';
+					return hljs.highlight(code, { language }).value;
+				}
+			};
+			marked.use(markedKatexExtension(options));
+			marked.use(markedExtension(options));
+			// DEVELOPER NOTE: Go to `$lib/components/chat/Messages/Markdown.svelte` to add extra markdown extensions for rendering.
 
-		const htmlContent = marked.parse(text);
+			const htmlContent = marked.parse(text);
 
-		// Add basic styling to make the content look better when pasted
-		const styledHtml = `
+			// Add basic styling to make the content look better when pasted
+			styledHtml = `
 			<div>
 				<style>
 					pre {
@@ -448,6 +483,10 @@ export const copyToClipboard = async (text, formatted = false) => {
 				${htmlContent}
 			</div>
 		`;
+		} else {
+			// If HTML is provided, use it directly
+			styledHtml = html;
+		}
 
 		// Create a blob with HTML content
 		const blob = new Blob([styledHtml], { type: 'text/html' });
@@ -789,9 +828,22 @@ export const isValidHttpUrl = (string: string) => {
 	return url.protocol === 'http:' || url.protocol === 'https:';
 };
 
+export const isYoutubeUrl = (url: string) => {
+	return (
+		url.startsWith('https://www.youtube.com') ||
+		url.startsWith('https://youtu.be') ||
+		url.startsWith('https://youtube.com') ||
+		url.startsWith('https://m.youtube.com')
+	);
+};
+
 export const removeEmojis = (str: string) => {
-	// Regular expression to match emojis
-	const emojiRegex = /[\uD800-\uDBFF][\uDC00-\uDFFF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDE4F]/g;
+	// Use Unicode property escape with the 'v' flag (ES2024) to match all
+	// standardised emoji sequences, including text-presentation emoji + variation
+	// selector (e.g. ❤️, ☀️, ✅), keycap sequences (e.g. 1️⃣), ZWJ families
+	// (e.g. 👨‍👩‍👧‍👦) and flag sequences (e.g. 🏳️‍🌈).
+	// The previous surrogate-pair regex missed the entire BMP emoji category.
+	const emojiRegex = /\p{RGI_Emoji}/gv;
 
 	// Replace emojis with an empty string
 	return str.replace(emojiRegex, '');
@@ -831,19 +883,27 @@ export const cleanText = (content: string) => {
 };
 
 export const removeDetails = (content, types) => {
-	for (const type of types) {
-		content = content.replace(
-			new RegExp(`<details\\s+type="${type}"[^>]*>.*?<\\/details>`, 'gis'),
-			''
-		);
-	}
-
-	return content;
+	return replaceOutsideCode(content, (segment) => {
+		for (const type of types) {
+			segment = segment.replace(
+				new RegExp(`<details\\s+type="${type}"[^>]*>.*?<\\/details>`, 'gis'),
+				''
+			);
+		}
+		return segment;
+	}).trim();
 };
 
 export const removeAllDetails = (content) => {
-	content = content.replace(/<details[^>]*>.*?<\/details>/gis, '');
-	return content;
+	// First pass: strip <details> blocks on the full string before code-fence
+	// splitting, so blocks whose body contains triple backticks are caught.
+	// (replaceOutsideCode splits on ``` fences, which breaks the <details>
+	// regex when the opening and closing tags land in different segments.)
+	content = content.replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '');
+	// Second pass: catch any remaining blocks that live outside code fences
+	return replaceOutsideCode(content, (segment) => {
+		return segment.replace(/<details[^>]*>.*?<\/details>/gis, '');
+	}).trim();
 };
 
 export const processDetails = (content) => {
@@ -861,7 +921,9 @@ export const processDetails = (content) => {
 				attributes[attributeMatch[1]] = attributeMatch[2];
 			}
 
-			content = content.replace(match, `"${attributes.result}"`);
+			if (attributes.result) {
+				content = content.replace(match, unescapeHtml(attributes.result));
+			}
 		}
 	}
 
@@ -882,8 +944,8 @@ export const extractSentences = (text: string) => {
 		return placeholder;
 	});
 
-	// Split the modified text into sentences based on common punctuation marks, avoiding these blocks
-	let sentences = text.split(/(?<=[.!?])\s+/);
+	// Split the modified text into sentences based on common punctuation marks or newlines, avoiding these blocks
+	let sentences = text.split(/(?<=[.!?])\s+|\n+/);
 
 	// Restore code blocks and process sentences
 	sentences = sentences.map((sentence) => {
@@ -937,6 +999,16 @@ export const extractSentencesForAudio = (text: string) => {
 };
 
 export const getMessageContentParts = (content: string, splitOn: string = 'punctuation') => {
+	// Strip <details> blocks directly on the full string before any
+	// code-block-aware processing. removeAllDetails (which callers use)
+	// applies the regex via replaceOutsideCode, which splits on triple-
+	// backtick code fences first. If a <details> block contains code
+	// fences (e.g. reasoning with code examples), the opening and
+	// closing tags land in separate segments and the regex fails,
+	// leaking thinking content into TTS. Applying the strip here on
+	// the full string catches those cases. (Fixes #22197)
+	content = content.replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '');
+
 	const messageContentParts: string[] = [];
 
 	switch (splitOn) {
@@ -961,9 +1033,10 @@ export const blobToFile = (blob, fileName) => {
 	return file;
 };
 
-export const getPromptVariables = (user_name, user_location) => {
+export const getPromptVariables = (user_name, user_location, user_email = '') => {
 	return {
 		'{{USER_NAME}}': user_name,
+		'{{USER_EMAIL}}': user_email || 'Unknown',
 		'{{USER_LOCATION}}': user_location || 'Unknown',
 		'{{CURRENT_DATETIME}}': getCurrentDateTime(),
 		'{{CURRENT_DATE}}': getFormattedDate(),
@@ -972,77 +1045,6 @@ export const getPromptVariables = (user_name, user_location) => {
 		'{{CURRENT_TIMEZONE}}': getUserTimezone(),
 		'{{USER_LANGUAGE}}': localStorage.getItem('locale') || 'en-US'
 	};
-};
-
-/**
- * @param {string} template - The template string containing placeholders.
- * @returns {string} The template string with the placeholders replaced by the prompt.
- */
-export const promptTemplate = (
-	template: string,
-	user_name?: string,
-	user_location?: string
-): string => {
-	// Get the current date
-	const currentDate = new Date();
-
-	// Format the date to YYYY-MM-DD
-	const formattedDate =
-		currentDate.getFullYear() +
-		'-' +
-		String(currentDate.getMonth() + 1).padStart(2, '0') +
-		'-' +
-		String(currentDate.getDate()).padStart(2, '0');
-
-	// Format the time to HH:MM:SS AM/PM
-	const currentTime = currentDate.toLocaleTimeString('en-US', {
-		hour: 'numeric',
-		minute: 'numeric',
-		second: 'numeric',
-		hour12: true
-	});
-
-	// Get the current weekday
-	const currentWeekday = getWeekday();
-
-	// Get the user's timezone
-	const currentTimezone = getUserTimezone();
-
-	// Get the user's language
-	const userLanguage = localStorage.getItem('locale') || 'en-US';
-
-	// Replace {{CURRENT_DATETIME}} in the template with the formatted datetime
-	template = template.replace('{{CURRENT_DATETIME}}', `${formattedDate} ${currentTime}`);
-
-	// Replace {{CURRENT_DATE}} in the template with the formatted date
-	template = template.replace('{{CURRENT_DATE}}', formattedDate);
-
-	// Replace {{CURRENT_TIME}} in the template with the formatted time
-	template = template.replace('{{CURRENT_TIME}}', currentTime);
-
-	// Replace {{CURRENT_WEEKDAY}} in the template with the current weekday
-	template = template.replace('{{CURRENT_WEEKDAY}}', currentWeekday);
-
-	// Replace {{CURRENT_TIMEZONE}} in the template with the user's timezone
-	template = template.replace('{{CURRENT_TIMEZONE}}', currentTimezone);
-
-	// Replace {{USER_LANGUAGE}} in the template with the user's language
-	template = template.replace('{{USER_LANGUAGE}}', userLanguage);
-
-	if (user_name) {
-		// Replace {{USER_NAME}} in the template with the user's name
-		template = template.replace('{{USER_NAME}}', user_name);
-	}
-
-	if (user_location) {
-		// Replace {{USER_LOCATION}} in the template with the current location
-		template = template.replace('{{USER_LOCATION}}', user_location);
-	} else {
-		// Replace {{USER_LOCATION}} in the template with 'Unknown' if no location is provided
-		template = template.replace('{{USER_LOCATION}}', 'LOCATION_UNKNOWN');
-	}
-
-	return template;
 };
 
 /**
@@ -1079,8 +1081,6 @@ export const titleGenerationTemplate = (template: string, prompt: string): strin
 		}
 	);
 
-	template = promptTemplate(template);
-
 	return template;
 };
 
@@ -1105,6 +1105,22 @@ export const approximateToHumanReadable = (nanoseconds: number) => {
 
 	return results.reverse().join(' ');
 };
+
+// Month names used as i18n translation keys — must be English regardless of locale
+const MONTH_NAMES = [
+	'January',
+	'February',
+	'March',
+	'April',
+	'May',
+	'June',
+	'July',
+	'August',
+	'September',
+	'October',
+	'November',
+	'December'
+];
 
 export const getTimeRange = (timestamp) => {
 	const now = new Date();
@@ -1131,7 +1147,7 @@ export const getTimeRange = (timestamp) => {
 	} else if (diffDays <= 30) {
 		return 'Previous 30 days';
 	} else if (nowYear === dateYear) {
-		return date.toLocaleString('default', { month: 'long' });
+		return MONTH_NAMES[dateMonth];
 	} else {
 		return date.getFullYear().toString();
 	}
@@ -1224,19 +1240,19 @@ export const getWeekday = () => {
 };
 
 export const createMessagesList = (history, messageId) => {
-	if (messageId === null) {
-		return [];
+	const list = [];
+	let currentId = messageId;
+
+	while (currentId !== null && currentId !== undefined) {
+		const message = history.messages[currentId];
+		if (message === undefined) {
+			break;
+		}
+		list.push(message);
+		currentId = message.parentId;
 	}
 
-	const message = history.messages[messageId];
-	if (message === undefined) {
-		return [];
-	}
-	if (message?.parentId) {
-		return [...createMessagesList(history, message.parentId), message];
-	} else {
-		return [message];
-	}
+	return list.reverse();
 };
 
 export const formatFileSize = (size) => {
@@ -1310,11 +1326,15 @@ function resolveSchema(schemaRef, components, resolvedSchemas = new Set()) {
 export const convertOpenApiToToolPayload = (openApiSpec) => {
 	const toolPayload = [];
 
+	// Guard against invalid or non-OpenAPI specs (e.g., MCP-style configs)
+	if (!openApiSpec || !openApiSpec.paths) {
+		return toolPayload;
+	}
+
 	for (const [path, methods] of Object.entries(openApiSpec.paths)) {
 		for (const [method, operation] of Object.entries(methods)) {
 			if (operation?.operationId) {
 				const tool = {
-					type: 'function',
 					name: operation.operationId,
 					description: operation.description || operation.summary || 'No description available.',
 					parameters: {
@@ -1327,17 +1347,20 @@ export const convertOpenApiToToolPayload = (openApiSpec) => {
 				// Extract path and query parameters
 				if (operation.parameters) {
 					operation.parameters.forEach((param) => {
-						let description = param.schema.description || param.description || '';
-						if (param.schema.enum && Array.isArray(param.schema.enum)) {
-							description += `. Possible values: ${param.schema.enum.join(', ')}`;
+						const paramName = param?.name;
+						if (!paramName) return;
+						const paramSchema = param?.schema ?? {};
+						let description = paramSchema.description || param.description || '';
+						if (paramSchema.enum && Array.isArray(paramSchema.enum)) {
+							description += `. Possible values: ${paramSchema.enum.join(', ')}`;
 						}
-						tool.parameters.properties[param.name] = {
-							type: param.schema.type,
+						tool.parameters.properties[paramName] = {
+							type: paramSchema.type,
 							description: description
 						};
 
 						if (param.required) {
-							tool.parameters.required.push(param.name);
+							tool.parameters.required.push(paramName);
 						}
 					});
 				}
@@ -1383,11 +1406,27 @@ export const slugify = (str: string): string => {
 			.replace(/[\u0300-\u036f]/g, '')
 			// 3. Replace any sequence of whitespace with a single hyphen
 			.replace(/\s+/g, '-')
-			// 4. Remove all characters except alphanumeric characters and hyphens
-			.replace(/[^a-zA-Z0-9-]/g, '')
+			// 4. Remove all characters except alphanumeric characters, hyphens, and underscores
+			.replace(/[^a-zA-Z0-9-_]/g, '')
 			// 5. Convert to lowercase
 			.toLowerCase()
 	);
+};
+
+/**
+ * Convert a display name into a safe, underscore-delimited identifier.
+ * Strips emojis, accents, and any non-alphanumeric characters so the
+ * result is always accepted by backend validation.
+ *
+ * e.g. "My Tool 😄" → "my_tool"
+ */
+export const nameToId = (name: string): string => {
+	return name
+		.normalize('NFD')
+		.replace(/[\u0300-\u036f]/g, '')
+		.replace(/[^\w]+/g, '_')
+		.replace(/^_+|_+$/g, '')
+		.toLowerCase();
 };
 
 export const extractInputVariables = (text: string): Record<string, any> => {
@@ -1472,24 +1511,39 @@ export const parseVariableDefinition = (definition: string): Record<string, any>
 	// Parse type (explicit or implied)
 	const type = firstPart.startsWith('type=') ? firstPart.slice(5) : firstPart;
 
-	// Parse properties using reduce
-	const properties = propertyParts.reduce((props, part) => {
-		// Use splitProperties for the equals sign as well, in case there are nested quotes
-		const equalsParts = splitProperties(part, '=');
-		const [propertyName, ...valueParts] = equalsParts;
-		const propertyValue = valueParts.join('='); // Handle values with = signs
+	// Parse properties; support both key=value and bare flags (e.g., ":required")
+	const properties = propertyParts.reduce(
+		(props, part) => {
+			const trimmed = part.trim();
+			if (!trimmed) return props;
 
-		return propertyName && propertyValue
-			? {
-					...props,
-					[propertyName.trim()]: parseJsonValue(propertyValue.trim())
+			// Use splitProperties for the equals sign as well, in case there are nested quotes
+			const equalsParts = splitProperties(trimmed, '=');
+
+			if (equalsParts.length === 1) {
+				// It's a flag with no value, e.g. "required" -> true
+				const flagName = equalsParts[0].trim();
+				if (flagName.length > 0) {
+					return { ...props, [flagName]: true };
 				}
-			: props;
-	}, {});
+				return props;
+			}
+
+			const [propertyName, ...valueParts] = equalsParts;
+			const propertyValueRaw = valueParts.join('='); // Handle values with extra '='
+
+			if (!propertyName || propertyValueRaw == null) return props;
+
+			return {
+				...props,
+				[propertyName.trim()]: parseJsonValue(propertyValueRaw.trim())
+			};
+		},
+		{} as Record<string, any>
+	);
 
 	return { type, ...properties };
 };
-
 export const parseJsonValue = (value: string): any => {
 	// Remove surrounding quotes if present (for string values)
 	if (value.startsWith('"') && value.endsWith('"')) {
@@ -1508,7 +1562,18 @@ export const parseJsonValue = (value: string): any => {
 	return value;
 };
 
-export const extractContentFromFile = async (file, pdfjsLib = null) => {
+async function ensurePDFjsLoaded() {
+	if (!window.pdfjsLib) {
+		const pdfjs = await import('pdfjs-dist');
+		pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+		if (!window.pdfjsLib) {
+			throw new Error('pdfjsLib is required for PDF extraction');
+		}
+	}
+	return window.pdfjsLib;
+}
+
+export const extractContentFromFile = async (file: File) => {
 	// Known text file extensions for extra fallback
 	const textExtensions = [
 		'.txt',
@@ -1525,31 +1590,28 @@ export const extractContentFromFile = async (file, pdfjsLib = null) => {
 		'.rtf'
 	];
 
-	function getExtension(filename) {
+	function getExtension(filename: string) {
 		const dot = filename.lastIndexOf('.');
 		return dot === -1 ? '' : filename.substr(dot).toLowerCase();
 	}
 
 	// Uses pdfjs to extract text from PDF
-	async function extractPdfText(file) {
-		if (!pdfjsLib) {
-			throw new Error('pdfjsLib is required for PDF extraction');
-		}
-
+	async function extractPdfText(file: File) {
+		const pdfjsLib = await ensurePDFjsLoaded();
 		const arrayBuffer = await file.arrayBuffer();
 		const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 		let allText = '';
 		for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
 			const page = await pdf.getPage(pageNum);
 			const content = await page.getTextContent();
-			const strings = content.items.map((item) => item.str);
+			const strings = content.items.map((item: any) => item.str);
 			allText += strings.join(' ') + '\n';
 		}
 		return allText;
 	}
 
 	// Reads file as text using FileReader
-	function readAsText(file) {
+	function readAsText(file: File) {
 		return new Promise((resolve, reject) => {
 			const reader = new FileReader();
 			reader.onload = () => resolve(reader.result);
@@ -1558,12 +1620,29 @@ export const extractContentFromFile = async (file, pdfjsLib = null) => {
 		});
 	}
 
+	async function extractDocxText(file: File) {
+		const [arrayBuffer, { default: mammoth }] = await Promise.all([
+			file.arrayBuffer(),
+			import('mammoth')
+		]);
+		const result = await mammoth.extractRawText({ arrayBuffer });
+		return result.value; // plain text
+	}
+
 	const type = file.type || '';
 	const ext = getExtension(file.name);
 
 	// PDF check
 	if (type === 'application/pdf' || ext === '.pdf') {
 		return await extractPdfText(file);
+	}
+
+	// DOCX check
+	if (
+		type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+		ext === '.docx'
+	) {
+		return await extractDocxText(file);
 	}
 
 	// Text check (plain or common text-based)
@@ -1576,5 +1655,201 @@ export const extractContentFromFile = async (file, pdfjsLib = null) => {
 		return await readAsText(file);
 	} catch (err) {
 		throw new Error('Unsupported or non-text file type: ' + (file.name || type));
+	}
+};
+
+export const getAge = (birthDate) => {
+	const today = new Date();
+	const bDate = new Date(birthDate);
+	let age = today.getFullYear() - bDate.getFullYear();
+	const m = today.getMonth() - bDate.getMonth();
+
+	if (m < 0 || (m === 0 && today.getDate() < bDate.getDate())) {
+		age--;
+	}
+	return age.toString();
+};
+
+export const convertHeicToJpeg = async (file: File) => {
+	const { default: heic2any } = await import('heic2any');
+	try {
+		return await heic2any({ blob: file, toType: 'image/jpeg' });
+	} catch (err: any) {
+		if (err?.message?.includes('already browser readable')) {
+			return file;
+		}
+		throw err;
+	}
+};
+
+export const decodeString = (str: string) => {
+	try {
+		return decodeURIComponent(str);
+	} catch (e) {
+		return str;
+	}
+};
+
+export const initMermaid = async () => {
+	const { default: mermaid } = await import('mermaid');
+	mermaid.initialize({
+		startOnLoad: false, // Should be false when using render API
+		theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
+		securityLevel: 'loose'
+	});
+	return mermaid;
+};
+
+export const renderMermaidDiagram = async (mermaid, code: string) => {
+	const parseResult = await mermaid.parse(code, { suppressErrors: false });
+	if (parseResult) {
+		const { svg } = await mermaid.render(`mermaid-${uuidv4()}`, code);
+		return svg;
+	}
+	return '';
+};
+
+export const renderVegaVisualization = async (spec: string, i18n?: any) => {
+	const vega = await import('vega');
+	const parsedSpec = JSON.parse(spec);
+	let vegaSpec = parsedSpec;
+	if (parsedSpec.$schema && parsedSpec.$schema.includes('vega-lite')) {
+		const vegaLite = await import('vega-lite');
+		vegaSpec = vegaLite.compile(parsedSpec).spec;
+	}
+	const view = new vega.View(vega.parse(vegaSpec), { renderer: 'none' });
+	const svg = await view.toSVG();
+	return svg;
+};
+
+export const getCodeBlockContents = (content: string): object => {
+	// Strip thinking/reasoning and other detail blocks before extracting code
+	// to prevent code inside <details type="reasoning"> from being treated as artifacts
+	content = removeAllDetails(content);
+
+	const codeBlockContents = content.match(/```[\s\S]*?```/g);
+
+	let codeBlocks = [];
+
+	// Groups of related HTML/CSS/JS blocks. Each HTML block starts a new group;
+	// CSS and JS blocks attach to the current (most recent) group.
+	// This preserves the existing behaviour for "dumb" models that output
+	// separate html/css/js blocks meant to form a single page, while also
+	// allowing multiple distinct HTML blocks to produce separate artifacts.
+	let htmlGroups: Array<{ html: string; css: string; js: string }> = [];
+
+	const initDefaultGroup = () => {
+		if (htmlGroups.length === 0) {
+			htmlGroups.push({ html: '', css: '', js: '' });
+		}
+	};
+
+	if (codeBlockContents) {
+		codeBlockContents.forEach((block) => {
+			const lang = block.split('\n')[0].replace('```', '').trim().toLowerCase();
+			const code = block.replace(/```[\s\S]*?\n/, '').replace(/```$/, '');
+			codeBlocks.push({ lang, code });
+		});
+
+		codeBlocks.forEach((block) => {
+			const { lang, code } = block;
+
+			if (lang === 'html') {
+				// Each HTML block starts a new group
+				htmlGroups.push({ html: code + '\n', css: '', js: '' });
+			} else if (lang === 'css') {
+				initDefaultGroup();
+				htmlGroups[htmlGroups.length - 1].css += code + '\n';
+			} else if (lang === 'javascript' || lang === 'js') {
+				initDefaultGroup();
+				htmlGroups[htmlGroups.length - 1].js += code + '\n';
+			}
+		});
+	} else {
+		// Remove details tags from the content to check if there are any code blocks
+		// hidden in the details tags (e.g. reasoning, etc.)
+		content = removeAllDetails(content);
+
+		const inlineHtml = content.match(/<html>[\s\S]*?<\/html>/gi);
+		const inlineCss = content.match(/<style>[\s\S]*?<\/style>/gi);
+		const inlineJs = content.match(/<script>[\s\S]*?<\/script>/gi);
+
+		if (inlineHtml) {
+			inlineHtml.forEach((block) => {
+				const content = block.replace(/<\/?html>/gi, ''); // Remove <html> tags
+				htmlGroups.push({ html: content + '\n', css: '', js: '' });
+			});
+		}
+		if (inlineCss) {
+			inlineCss.forEach((block) => {
+				const content = block.replace(/<\/?style>/gi, ''); // Remove <style> tags
+				initDefaultGroup();
+				htmlGroups[htmlGroups.length - 1].css += content + '\n';
+			});
+		}
+		if (inlineJs) {
+			inlineJs.forEach((block) => {
+				const content = block.replace(/<\/?script>/gi, ''); // Remove <script> tags
+				initDefaultGroup();
+				htmlGroups[htmlGroups.length - 1].js += content + '\n';
+			});
+		}
+	}
+
+	// Backward-compatible flat fields (merged from all groups)
+	const htmlContent = htmlGroups.map((g) => g.html).join('');
+	const cssContent = htmlGroups.map((g) => g.css).join('');
+	const jsContent = htmlGroups.map((g) => g.js).join('');
+
+	return {
+		codeBlocks: codeBlocks,
+		html: htmlContent.trim(),
+		css: cssContent.trim(),
+		js: jsContent.trim(),
+		htmlGroups: htmlGroups
+			.filter((g) => g.html.trim() || g.css.trim() || g.js.trim())
+			.map((g) => ({
+				html: g.html.trim(),
+				css: g.css.trim(),
+				js: g.js.trim()
+			}))
+	};
+};
+export const parseFrontmatter = (content) => {
+	const match = content.match(/^---\s*\n([\s\S]*?)\n---/);
+	if (match) {
+		const frontmatter = {};
+		match[1].split('\n').forEach((line) => {
+			const [key, ...value] = line.split(':');
+			if (key && value) {
+				frontmatter[key.trim()] = value
+					.join(':')
+					.trim()
+					.replace(/^["']|["']$/g, '');
+			}
+		});
+		return frontmatter;
+	}
+	return {};
+};
+
+export const formatSkillName = (name) => {
+	return name.replace(/[-_]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+};
+
+/**
+ * Open the file browser panel to display a specific file.
+ * Used by both the direct tool execution path (client-side) and the
+ * backend event path (server-side) so behaviour is consistent.
+ *
+ * Stores are passed in by the caller to keep this utility pure.
+ */
+export const displayFileHandler = (
+	path: string,
+	stores: { showControls: Writable<boolean>; showFileNavPath: Writable<string | null> }
+) => {
+	if (path) {
+		stores.showControls.set(true);
+		stores.showFileNavPath.set(path);
 	}
 };

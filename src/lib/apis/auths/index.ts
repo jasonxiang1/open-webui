@@ -393,7 +393,7 @@ export const addUser = async (
 	return res;
 };
 
-export const updateUserProfile = async (token: string, name: string, profileImageUrl: string) => {
+export const updateUserProfile = async (token: string, profile: object) => {
 	let error = null;
 
 	const res = await fetch(`${WEBUI_API_BASE_URL}/auths/update/profile`, {
@@ -403,8 +403,7 @@ export const updateUserProfile = async (token: string, name: string, profileImag
 			...(token && { authorization: `Bearer ${token}` })
 		},
 		body: JSON.stringify({
-			name: name,
-			profile_image_url: profileImageUrl
+			...profile
 		})
 	})
 		.then(async (res) => {
@@ -422,6 +421,19 @@ export const updateUserProfile = async (token: string, name: string, profileImag
 	}
 
 	return res;
+};
+
+export const updateUserTimezone = async (token: string, timezone: string) => {
+	await fetch(`${WEBUI_API_BASE_URL}/auths/update/timezone`, {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			...(token && { authorization: `Bearer ${token}` })
+		},
+		body: JSON.stringify({ timezone })
+	}).catch((err) => {
+		console.error('Failed to update timezone:', err);
+	});
 };
 
 export const updateUserPassword = async (token: string, password: string, newPassword: string) => {

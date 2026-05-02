@@ -10,6 +10,7 @@
 	import Modal from '$lib/components/common/Modal.svelte';
 	import { generateInitialsImage } from '$lib/utils';
 	import XMark from '$lib/components/icons/XMark.svelte';
+	import SensitiveInput from '$lib/components/common/SensitiveInput.svelte';
 
 	const i18n = getContext('i18n');
 	const dispatch = createEventDispatcher();
@@ -103,7 +104,9 @@
 						}
 					}
 
-					toast.success(`Successfully imported ${userCount} users.`);
+					toast.success(
+						$i18n.t('Successfully imported {{userCount}} users.', { userCount: userCount })
+					);
 					inputFiles = null;
 					const uploadInputElement = document.getElementById('upload-user-csv-input');
 
@@ -130,6 +133,7 @@
 			<div class=" text-lg font-medium self-center">{$i18n.t('Add User')}</div>
 			<button
 				class="self-center"
+				aria-label={$i18n.t('Close')}
 				on:click={() => {
 					show = false;
 				}}
@@ -179,6 +183,7 @@
 									<select
 										class="w-full capitalize rounded-lg text-sm bg-transparent dark:disabled:text-gray-500 outline-hidden"
 										bind:value={_user.role}
+										aria-label={$i18n.t('Role')}
 										placeholder={$i18n.t('Enter Your Role')}
 										required
 									>
@@ -197,6 +202,7 @@
 										class="w-full text-sm bg-transparent disabled:text-gray-500 dark:disabled:text-gray-500 outline-hidden"
 										type="text"
 										bind:value={_user.name}
+										aria-label={$i18n.t('Name')}
 										placeholder={$i18n.t('Enter Your Full Name')}
 										autocomplete="off"
 										required
@@ -204,7 +210,7 @@
 								</div>
 							</div>
 
-							<hr class=" border-gray-100 dark:border-gray-850 my-2.5 w-full" />
+							<hr class=" border-gray-100/30 dark:border-gray-850/30 my-2.5 w-full" />
 
 							<div class="flex flex-col w-full">
 								<div class=" mb-1 text-xs text-gray-500">{$i18n.t('Email')}</div>
@@ -214,6 +220,7 @@
 										class="w-full text-sm bg-transparent disabled:text-gray-500 dark:disabled:text-gray-500 outline-hidden"
 										type="email"
 										bind:value={_user.email}
+										aria-label={$i18n.t('Email')}
 										placeholder={$i18n.t('Enter Your Email')}
 										required
 									/>
@@ -224,12 +231,14 @@
 								<div class=" mb-1 text-xs text-gray-500">{$i18n.t('Password')}</div>
 
 								<div class="flex-1">
-									<input
+									<SensitiveInput
 										class="w-full text-sm bg-transparent disabled:text-gray-500 dark:disabled:text-gray-500 outline-hidden"
 										type="password"
 										bind:value={_user.password}
+										aria-label={$i18n.t('Password')}
 										placeholder={$i18n.t('Enter Your Password')}
 										autocomplete="off"
+										required
 									/>
 								</div>
 							</div>
@@ -276,7 +285,7 @@
 
 					<div class="flex justify-end pt-3 text-sm font-medium">
 						<button
-							class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full flex flex-row space-x-1 items-center {loading
+							class="px-3.5 py-1.5 text-sm font-medium bg-black hover:bg-gray-900 text-white dark:bg-white dark:text-black dark:hover:bg-gray-100 transition rounded-full flex items-center gap-2 whitespace-nowrap {loading
 								? ' cursor-not-allowed'
 								: ''}"
 							type="submit"
@@ -285,9 +294,9 @@
 							{$i18n.t('Save')}
 
 							{#if loading}
-								<div class="ml-2 self-center">
+								<span class="shrink-0">
 									<Spinner />
-								</div>
+								</span>
 							{/if}
 						</button>
 					</div>

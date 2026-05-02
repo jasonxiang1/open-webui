@@ -9,7 +9,7 @@
 		currentChatPage,
 		temporaryChatEnabled
 	} from '$lib/stores';
-	import { tick, getContext, onMount, createEventDispatcher } from 'svelte';
+	import { tick, getContext, onMount, onDestroy, createEventDispatcher } from 'svelte';
 	const dispatch = createEventDispatcher();
 
 	import { toast } from 'svelte-sonner';
@@ -36,7 +36,9 @@
 
 	let messages = [];
 
-	export let sendPrompt: Function;
+	export let setInputText: Function = () => {};
+
+	export let sendMessage: Function;
 	export let continueResponse: Function;
 	export let regenerateResponse: Function;
 	export let mergeResponses: Function;
@@ -47,13 +49,15 @@
 	export let addMessages: Function = () => {};
 
 	export let readOnly = false;
+	export let editCodeBlock = true;
 
+	export let topPadding = false;
 	export let bottomPadding = false;
 	export let autoScroll;
 
 	export let onSelect = (e) => {};
 
-	let messagesCount = 20;
+	export let messagesCount: number | null = 20;
 	let messagesLoading = false;
 
 	const loadMoreMessages = async () => {
@@ -63,25 +67,64 @@
 
 		messagesLoading = true;
 		messagesCount += 20;
+		buildMessages();
 
 		await tick();
 
 		messagesLoading = false;
 	};
 
-	$: if (history.currentId) {
+	let pendingRebuild = null;
+	let lastCurrentId = null;
+
+	const buildMessages = () => {
 		let _messages = [];
 
 		let message = history.messages[history.currentId];
-		while (message && _messages.length <= messagesCount) {
-			_messages.unshift({ ...message });
+		const visitedMessageIds = new Set();
+
+		while (message && (messagesCount !== null ? _messages.length <= messagesCount : true)) {
+			if (visitedMessageIds.has(message.id)) {
+				console.warn('Circular dependency detected in message history', message.id);
+				break;
+			}
+			visitedMessageIds.add(message.id);
+
+			_messages.push(message);
 			message = message.parentId !== null ? history.messages[message.parentId] : null;
 		}
 
-		messages = _messages;
-	} else {
-		messages = [];
-	}
+		messages = _messages.reverse();
+	};
+
+	// Throttle message list rebuilds to once per animation frame during streaming.
+	// Structural changes (currentId change) always rebuild immediately.
+	const handleHistoryChange = (currentId, _messages) => {
+		if (!currentId) {
+			messages = [];
+			return;
+		}
+
+		const currentIdChanged = currentId !== lastCurrentId;
+		lastCurrentId = currentId;
+
+		if (currentIdChanged) {
+			// Structural change: new chat, navigation, new message — rebuild immediately
+			cancelAnimationFrame(pendingRebuild);
+			pendingRebuild = null;
+			buildMessages();
+		} else if (_messages) {
+			// Content update (streaming) — throttle to once per frame
+			if (!pendingRebuild) {
+				pendingRebuild = requestAnimationFrame(() => {
+					pendingRebuild = null;
+					buildMessages();
+				});
+			}
+		}
+	};
+
+	$: handleHistoryChange(history.currentId, history.messages);
 
 	$: if (autoScroll && bottomPadding) {
 		(async () => {
@@ -292,7 +335,7 @@
 				history.currentId = userMessageId;
 
 				await tick();
-				await sendPrompt(history, userPrompt, userMessageId);
+				await sendMessage(history, userMessageId);
 			} else {
 				// Edit user message
 				history.messages[messageId].content = content;
@@ -342,6 +385,10 @@
 	};
 
 	const saveMessage = async (messageId, message) => {
+		if (!history.messages?.[messageId]) {
+			return;
+		}
+
 		history.messages[messageId] = message;
 		await updateChat();
 	};
@@ -376,13 +423,12 @@
 			delete history.messages[id];
 		});
 
-		await tick();
-
-		showMessage({ id: parentMessageId });
-
-		// Update the chat
-		await updateChat();
+		showMessage({ id: parentMessageId }, false);
 	};
+
+	onDestroy(() => {
+		cancelAnimationFrame(pendingRebuild);
+	});
 
 	const triggerScroll = () => {
 		if (autoScroll) {
@@ -401,7 +447,8 @@
 	{:else}
 		<div class="w-full pt-2">
 			{#key chatId}
-				<div class="w-full">
+				<section class="w-full" aria-labelledby="chat-conversation">
+					<h2 class="sr-only" id="chat-conversation">{$i18n.t('Chat Conversation')}</h2>
 					{#if messages.at(0)?.parentId !== null}
 						<Loader
 							on:visible={(e) => {
@@ -413,39 +460,43 @@
 						>
 							<div class="w-full flex justify-center py-1 text-xs animate-pulse items-center gap-2">
 								<Spinner className=" size-4" />
-								<div class=" ">Loading...</div>
+								<div class=" ">{$i18n.t('Loading...')}</div>
 							</div>
 						</Loader>
 					{/if}
-
-					{#each messages as message, messageIdx (message.id)}
-						<Message
-							{chatId}
-							bind:history
-							{selectedModels}
-							messageId={message.id}
-							idx={messageIdx}
-							{user}
-							{gotoMessage}
-							{showPreviousMessage}
-							{showNextMessage}
-							{updateChat}
-							{editMessage}
-							{deleteMessage}
-							{rateMessage}
-							{actionMessage}
-							{saveMessage}
-							{submitMessage}
-							{regenerateResponse}
-							{continueResponse}
-							{mergeResponses}
-							{addMessages}
-							{triggerScroll}
-							{readOnly}
-						/>
-					{/each}
-				</div>
-				<div class="pb-12" />
+					<ul role="log" aria-live="polite" aria-relevant="additions" aria-atomic="false">
+						{#each messages as message, messageIdx (message.id)}
+							<Message
+								{chatId}
+								bind:history
+								{selectedModels}
+								messageId={message.id}
+								idx={messageIdx}
+								{user}
+								{setInputText}
+								{gotoMessage}
+								{showPreviousMessage}
+								{showNextMessage}
+								{updateChat}
+								{editMessage}
+								{deleteMessage}
+								{rateMessage}
+								{actionMessage}
+								{saveMessage}
+								{submitMessage}
+								{regenerateResponse}
+								{continueResponse}
+								{mergeResponses}
+								{addMessages}
+								{triggerScroll}
+								{readOnly}
+								{editCodeBlock}
+								{topPadding}
+							/>
+						{/each}
+					</ul>
+				</section>
+				<div class="pb-18" />
 				{#if bottomPadding}
 					<div class="  pb-6" />
 				{/if}

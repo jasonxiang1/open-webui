@@ -1,12 +1,8 @@
 <script lang="ts">
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
 	import { v4 as uuidv4 } from 'uuid';
-	import heic2any from 'heic2any';
 	import fileSaver from 'file-saver';
 	const { saveAs } = fileSaver;
-
-	import jsPDF from 'jspdf';
-	import html2canvas from 'html2canvas-pro';
 
 	const i18n = getContext('i18n');
 
@@ -26,18 +22,30 @@
 
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
-	import { compressImage, copyToClipboard, splitStream } from '$lib/utils';
+	import { compressImage, copyToClipboard, splitStream, convertHeicToJpeg } from '$lib/utils';
 	import { WEBUI_API_BASE_URL, WEBUI_BASE_URL } from '$lib/constants';
-	import { uploadFile } from '$lib/apis/files';
+	import { getFileById, uploadFile } from '$lib/apis/files';
+	import { getChatById } from '$lib/apis/chats';
 	import { chatCompletion, generateOpenAIChatCompletion } from '$lib/apis/openai';
+	import { getSkills } from '$lib/apis/skills';
 
-	import { config, models, settings, showSidebar, socket, user, WEBUI_NAME } from '$lib/stores';
+	import {
+		config,
+		mobile,
+		models,
+		settings,
+		showSidebar,
+		socket,
+		user,
+		WEBUI_NAME
+	} from '$lib/stores';
+
+	import { downloadPdf } from './utils';
+
+	import Controls from './NoteEditor/Controls.svelte';
+	import Chat from './NoteEditor/Chat.svelte';
 
 	import NotePanel from '$lib/components/notes/NotePanel.svelte';
-	import MenuLines from '../icons/MenuLines.svelte';
-	import ChatBubbleOval from '../icons/ChatBubbleOval.svelte';
-	import Settings from './NoteEditor/Settings.svelte';
-	import Chat from './NoteEditor/Chat.svelte';
 	import AccessControlModal from '$lib/components/workspace/common/AccessControlModal.svelte';
 
 	async function loadLocale(locales) {
@@ -54,16 +62,23 @@
 	// Assuming $i18n.languages is an array of language codes
 	$: loadLocale($i18n.languages);
 
-	import { deleteNoteById, getNoteById, updateNoteById } from '$lib/apis/notes';
+	import {
+		deleteNoteById,
+		getNoteById,
+		updateNoteById,
+		updateNoteAccessGrants
+	} from '$lib/apis/notes';
 
 	import RichTextInput from '../common/RichTextInput.svelte';
 	import Spinner from '../common/Spinner.svelte';
 	import MicSolid from '../icons/MicSolid.svelte';
 	import VoiceRecording from '../chat/MessageInput/VoiceRecording.svelte';
 	import DeleteConfirmDialog from '$lib/components/common/ConfirmDialog.svelte';
+	import ChatBubbleOval from '../icons/ChatBubbleOval.svelte';
 
 	import Calendar from '../icons/Calendar.svelte';
 	import Users from '../icons/Users.svelte';
+	import LockClosed from '../icons/LockClosed.svelte';
 
 	import Image from '../common/Image.svelte';
 	import FileItem from '../common/FileItem.svelte';
@@ -77,12 +92,61 @@
 	import Bars3BottomLeft from '../icons/Bars3BottomLeft.svelte';
 	import ArrowUturnLeft from '../icons/ArrowUturnLeft.svelte';
 	import ArrowUturnRight from '../icons/ArrowUturnRight.svelte';
-	import Sidebar from '../common/Sidebar.svelte';
+	import Sidebar from '../icons/Sidebar.svelte';
 	import ArrowRight from '../icons/ArrowRight.svelte';
 	import Cog6 from '../icons/Cog6.svelte';
 	import AiMenu from './AIMenu.svelte';
+	import AdjustmentsHorizontalOutline from '../icons/AdjustmentsHorizontalOutline.svelte';
+	import Mic from '../icons/Mic.svelte';
 
 	export let id: null | string = null;
+
+	const CLARA_TARGET_NOTE_STORAGE_KEY = 'clara-target-note-id';
+	const CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY = 'clara-note-estimate-chat-ids';
+	const CLARA_RESULT_BOOTSTRAP_KEY = 'clara-result-bootstrap';
+	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
+	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
+	const COST_CHAT_CODE_INTERPRETER_ENABLED = false;
+
+	type SkillItem = {
+		id: string;
+		name?: string;
+		is_active?: boolean;
+	};
+
+	type DraftNoteAttachment = {
+		id: string;
+		title: string;
+		updated_at?: number;
+		type: 'note';
+		name: string;
+		description: string;
+		status: 'processed';
+	};
+
+	type ClaraResultBootstrap = {
+		prompt: string;
+		files: DraftNoteAttachment[];
+		skillId: string;
+		skillName: string;
+		modelId: string;
+		codeInterpreterEnabled: boolean;
+	};
+
+	type ClaraEstimateSnapshot = {
+		source: 'clara-estimate';
+		noteId: string;
+		noteTitle: string;
+		noteContentFingerprint: string;
+		modelId: string;
+		skillId: string;
+		skillName: string;
+		prompt: string;
+		rawContent: string;
+		resultContent: string;
+		structuredEstimate?: unknown;
+		createdAt: number;
+	};
 
 	let editor = null;
 	let note = null;
@@ -100,8 +164,17 @@
 		},
 		// pages: [], // TODO: Implement pages for notes to allow users to create multiple pages in a note
 		meta: null,
-		access_control: {}
+		access_grants: []
 	};
+
+	const hasPublicReadGrant = (grants) =>
+		Array.isArray(grants) &&
+		grants.some(
+			(grant) =>
+				grant?.principal_type === 'user' &&
+				grant?.principal_id === '*' &&
+				grant?.permission === 'read'
+		);
 
 	let files = [];
 	let messages = [];
@@ -118,9 +191,12 @@
 	let showPanel = false;
 	let selectedPanel = 'chat';
 
+	let selectedContent = null;
+
 	let showDeleteConfirm = false;
 	let showAccessControlModal = false;
 
+	let ignoreBlur = false;
 	let titleInputFocused = false;
 	let titleGenerating = false;
 
@@ -133,6 +209,51 @@
 	let stopResponseFlag = false;
 
 	let inputElement = null;
+	let lastEstimateChatIdForNote: string | null = null;
+	let latestEstimateSnapshotForNote: ClaraEstimateSnapshot | null = null;
+
+	// Computed HTML for editor: fall back to markdown if HTML is missing
+	$: editorHtml =
+		note?.data?.content?.html ||
+		(note?.data?.content?.md ? marked.parse(note.data.content.md) : '');
+
+	$: canOpenClara =
+		($config?.features?.enable_notes ?? false) &&
+		($user?.role === 'admin' || ($user?.permissions?.features?.notes ?? true));
+	$: lastEstimateChatIdForNote =
+		typeof localStorage !== 'undefined' && note?.id
+		? (
+				JSON.parse(
+					localStorage.getItem(CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY) ?? '{}'
+				) as Record<string, string>
+			)[note.id] ?? null
+		: null;
+	$: currentNoteContentFingerprint = fingerprintNoteContent(note?.data?.content?.md ?? '');
+	$: estimateActionMode =
+		lastEstimateChatIdForNote &&
+		latestEstimateSnapshotForNote?.noteContentFingerprint === currentNoteContentFingerprint
+			? 'last'
+			: 'compute';
+
+	const fingerprintNoteContent = (content: string) => content.replace(/\r\n/g, '\n').trim();
+	const describeNote = (updatedAt?: number) =>
+		updatedAt ? dayjs(updatedAt / 1000000).fromNow() : $i18n.t('Clara');
+
+	const loadLatestEstimateSnapshotForNote = async () => {
+		if (!lastEstimateChatIdForNote || !note?.id) {
+			latestEstimateSnapshotForNote = null;
+			return;
+		}
+
+		const chat = await getChatById(localStorage.token, lastEstimateChatIdForNote).catch(() => null);
+		const snapshot = chat?.chat?.claraEstimate as ClaraEstimateSnapshot | undefined;
+		latestEstimateSnapshotForNote =
+			snapshot?.source === 'clara-estimate' && snapshot?.noteId === note.id ? snapshot : null;
+	};
+
+	$: if (note?.id) {
+		loadLatestEstimateSnapshotForNote();
+	}
 
 	const init = async () => {
 		loading = true;
@@ -145,7 +266,20 @@
 
 		if (res) {
 			note = res;
+			if (!Array.isArray(note?.access_grants)) {
+				note.access_grants = [];
+			}
 			files = res.data.files || [];
+
+			if (note?.write_access) {
+				$socket?.emit('join-note', {
+					note_id: id,
+					auth: {
+						token: localStorage.token
+					}
+				});
+				$socket?.on('note-events', noteEventHandler);
+			}
 		} else {
 			goto('/');
 			return;
@@ -167,7 +301,7 @@
 				data: {
 					files: files
 				},
-				access_control: note?.access_control
+				access_grants: note?.access_grants ?? []
 			}).catch((e) => {
 				toast.error(`${e}`);
 			});
@@ -382,6 +516,13 @@ ${content}
 
 		files = [...files, fileItem];
 
+		// open the settings panel if it is not open
+		selectedPanel = 'settings';
+
+		if (!showPanel) {
+			showPanel = true;
+		}
+
 		try {
 			// If the file is an audio file, provide the language for STT.
 			let metadata = null;
@@ -398,11 +539,7 @@ ${content}
 			const uploadedFile = await uploadFile(localStorage.token, file, metadata);
 
 			if (uploadedFile) {
-				console.log('File upload completed:', {
-					id: uploadedFile.id,
-					name: fileItem.name,
-					collection: uploadedFile?.meta?.collection_name
-				});
+				console.log('File upload completed:', uploadedFile);
 
 				if (uploadedFile.error) {
 					console.warn('File upload warning:', uploadedFile.error);
@@ -410,12 +547,15 @@ ${content}
 				}
 
 				fileItem.status = 'uploaded';
-				fileItem.file = uploadedFile;
+				fileItem.file = await getFileById(localStorage.token, uploadedFile.id).catch((e) => {
+					toast.error(`${e}`);
+					return null;
+				});
 				fileItem.id = uploadedFile.id;
 				fileItem.collection_name =
 					uploadedFile?.meta?.collection_name || uploadedFile?.collection_name;
 
-				fileItem.url = `${WEBUI_API_BASE_URL}/files/${uploadedFile.id}`;
+				fileItem.url = `${uploadedFile.id}`;
 
 				files = files;
 			} else {
@@ -432,95 +572,111 @@ ${content}
 			note.data.files = null;
 		}
 
+		editor.storage.files = files;
+
 		changeDebounceHandler();
+
+		return fileItem;
+	};
+
+	const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
+		// Quick shortcut so we don’t do unnecessary work.
+		const settingsCompression = settings?.imageCompression ?? false;
+		const configWidth = config?.file?.image_compression?.width ?? null;
+		const configHeight = config?.file?.image_compression?.height ?? null;
+
+		// If neither settings nor config wants compression, return original URL.
+		if (!settingsCompression && !configWidth && !configHeight) {
+			return imageUrl;
+		}
+
+		// Default to null (no compression unless set)
+		let width = null;
+		let height = null;
+
+		// If user/settings want compression, pick their preferred size.
+		if (settingsCompression) {
+			width = settings?.imageCompressionSize?.width ?? null;
+			height = settings?.imageCompressionSize?.height ?? null;
+		}
+
+		// Apply config limits as an upper bound if any
+		if (configWidth && (width === null || width > configWidth)) {
+			width = configWidth;
+		}
+		if (configHeight && (height === null || height > configHeight)) {
+			height = configHeight;
+		}
+
+		// Do the compression if required
+		if (width || height) {
+			return await compressImage(imageUrl, width, height);
+		}
+		return imageUrl;
+	};
+
+	const inputFileHandler = async (file) => {
+		console.log('Processing file:', {
+			name: file.name,
+			type: file.type,
+			size: file.size,
+			extension: file.name.split('.').at(-1)
+		});
+
+		if (
+			($config?.file?.max_size ?? null) !== null &&
+			file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
+		) {
+			console.log('File exceeds max size limit:', {
+				fileSize: file.size,
+				maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
+			});
+			toast.error(
+				$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
+					maxSize: $config?.file?.max_size
+				})
+			);
+			return;
+		}
+
+		if (file['type'].startsWith('image/')) {
+			const uploadImagePromise = new Promise(async (resolve, reject) => {
+				let reader = new FileReader();
+				reader.onload = async (event) => {
+					try {
+						let imageUrl = event.target.result;
+						imageUrl = await compressImageHandler(imageUrl, $settings, $config);
+
+						const fileId = uuidv4();
+						const fileItem = {
+							id: fileId,
+							type: 'image',
+							url: `${imageUrl}`
+						};
+						files = [...files, fileItem];
+						note.data.files = files;
+						editor.storage.files = files;
+
+						changeDebounceHandler();
+						resolve(fileItem);
+					} catch (err) {
+						reject(err);
+					}
+				};
+
+				reader.readAsDataURL(file['type'] === 'image/heic' ? await convertHeicToJpeg(file) : file);
+			});
+
+			return await uploadImagePromise;
+		} else {
+			return await uploadFileHandler(file);
+		}
 	};
 
 	const inputFilesHandler = async (inputFiles) => {
 		console.log('Input files handler called with:', inputFiles);
 		inputFiles.forEach(async (file) => {
-			console.log('Processing file:', {
-				name: file.name,
-				type: file.type,
-				size: file.size,
-				extension: file.name.split('.').at(-1)
-			});
-
-			if (
-				($config?.file?.max_size ?? null) !== null &&
-				file.size > ($config?.file?.max_size ?? 0) * 1024 * 1024
-			) {
-				console.log('File exceeds max size limit:', {
-					fileSize: file.size,
-					maxSize: ($config?.file?.max_size ?? 0) * 1024 * 1024
-				});
-				toast.error(
-					$i18n.t(`File size should not exceed {{maxSize}} MB.`, {
-						maxSize: $config?.file?.max_size
-					})
-				);
-				return;
-			}
-
-			if (file['type'].startsWith('image/')) {
-				const compressImageHandler = async (imageUrl, settings = {}, config = {}) => {
-					// Quick shortcut so we don’t do unnecessary work.
-					const settingsCompression = settings?.imageCompression ?? false;
-					const configWidth = config?.file?.image_compression?.width ?? null;
-					const configHeight = config?.file?.image_compression?.height ?? null;
-
-					// If neither settings nor config wants compression, return original URL.
-					if (!settingsCompression && !configWidth && !configHeight) {
-						return imageUrl;
-					}
-
-					// Default to null (no compression unless set)
-					let width = null;
-					let height = null;
-
-					// If user/settings want compression, pick their preferred size.
-					if (settingsCompression) {
-						width = settings?.imageCompressionSize?.width ?? null;
-						height = settings?.imageCompressionSize?.height ?? null;
-					}
-
-					// Apply config limits as an upper bound if any
-					if (configWidth && (width === null || width > configWidth)) {
-						width = configWidth;
-					}
-					if (configHeight && (height === null || height > configHeight)) {
-						height = configHeight;
-					}
-
-					// Do the compression if required
-					if (width || height) {
-						return await compressImage(imageUrl, width, height);
-					}
-					return imageUrl;
-				};
-
-				let reader = new FileReader();
-				reader.onload = async (event) => {
-					let imageUrl = event.target.result;
-
-					imageUrl = await compressImageHandler(imageUrl, $settings, $config);
-
-					files = [
-						...files,
-						{
-							type: 'image',
-							url: `${imageUrl}`
-						}
-					];
-					note.data.files = files;
-				};
-				reader.readAsDataURL(
-					file['type'] === 'image/heic'
-						? await heic2any({ blob: file, toType: 'image/jpeg' })
-						: file
-				);
-			} else {
-				uploadFileHandler(file);
-			}
+			await inputFileHandler(file);
 		});
 	};
 
@@ -533,71 +689,11 @@ ${content}
 			const blob = new Blob([note.data.content.md], { type: 'text/markdown' });
 			saveAs(blob, `${note.title}.md`);
 		} else if (type === 'pdf') {
-			await downloadPdf(note);
-		}
-	};
-
-	const downloadPdf = async (note) => {
-		try {
-			// Define a fixed virtual screen size
-			const virtualWidth = 1024; // Fixed width (adjust as needed)
-			const virtualHeight = 1400; // Fixed height (adjust as needed)
-
-			// STEP 1. Get a DOM node to render
-			const html = note.data?.content?.html ?? '';
-			let node;
-			if (html instanceof HTMLElement) {
-				node = html;
-			} else {
-				// If it's HTML string, render to a temporary hidden element
-				node = document.createElement('div');
-				node.innerHTML = html;
-				document.body.appendChild(node);
+			try {
+				await downloadPdf(note);
+			} catch (error) {
+				toast.error(`${error}`);
 			}
-
-			// Render to canvas with predefined width
-			const canvas = await html2canvas(node, {
-				useCORS: true,
-				scale: 2, // Keep at 1x to avoid unexpected enlargements
-				width: virtualWidth, // Set fixed virtual screen width
-				windowWidth: virtualWidth, // Ensure consistent rendering
-				windowHeight: virtualHeight
-			});
-
-			// Remove hidden node if needed
-			if (!(html instanceof HTMLElement)) {
-				document.body.removeChild(node);
-			}
-
-			const imgData = canvas.toDataURL('image/png');
-
-			// A4 page settings
-			const pdf = new jsPDF('p', 'mm', 'a4');
-			const imgWidth = 210; // A4 width in mm
-			const pageHeight = 297; // A4 height in mm
-
-			// Maintain aspect ratio
-			const imgHeight = (canvas.height * imgWidth) / canvas.width;
-			let heightLeft = imgHeight;
-			let position = 0;
-
-			pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-			heightLeft -= pageHeight;
-
-			// Handle additional pages
-			while (heightLeft > 0) {
-				position -= pageHeight;
-				pdf.addPage();
-
-				pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-				heightLeft -= pageHeight;
-			}
-
-			pdf.save(`${note.title}.pdf`);
-		} catch (error) {
-			console.error('Error generating PDF', error);
-
-			toast.error(`${error}`);
 		}
 	};
 
@@ -613,6 +709,90 @@ ${content}
 		} else {
 			toast.error($i18n.t('Failed to delete note'));
 		}
+	};
+
+	const openInClara = async () => {
+		if (!note?.id) return;
+
+		localStorage.setItem(CLARA_TARGET_NOTE_STORAGE_KEY, note.id);
+		await goto('/clara');
+	};
+
+	const resolveCostEstimateSkill = async () => {
+		const skills = (await getSkills(localStorage.token).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		})) as SkillItem[] | null;
+
+		if (!skills) return null;
+
+		return (
+			skills.find(
+				(skill) =>
+					skill?.is_active !== false &&
+					[skill.id, skill.name]
+						.filter(Boolean)
+						.some((value) => value?.toLowerCase() === COST_ESTIMATE_SKILL_KEY)
+			) ?? null
+		);
+	};
+
+	const openLastEstimate = async () => {
+		if (!lastEstimateChatIdForNote) return;
+		await goto(`/clara/result?chatId=${lastEstimateChatIdForNote}`);
+	};
+
+	const computeEstimateFromNote = async () => {
+		if (!note?.id) return;
+
+		const model = $models.find((item) => item.id === COST_CHAT_MODEL_ID);
+		if (!model) {
+			toast.error($i18n.t('The required model is not available.'));
+			return;
+		}
+
+		if (model?.info?.meta?.capabilities?.file_upload === false) {
+			toast.error($i18n.t('The required model does not support note attachments.'));
+			return;
+		}
+
+		const skill = await resolveCostEstimateSkill();
+		if (!skill) {
+			toast.error($i18n.t('The cost-estimate skill is not available.'));
+			return;
+		}
+
+		const attachment: DraftNoteAttachment = {
+			id: note.id,
+			title: note.title || $i18n.t('Untitled'),
+			updated_at: note.updated_at,
+			type: 'note',
+			name: note.title || $i18n.t('Untitled'),
+			description: describeNote(note.updated_at),
+			status: 'processed'
+		};
+
+		const bootstrap: ClaraResultBootstrap = {
+			prompt: `${$i18n.t('Use the attached note to estimate project costs.')}`,
+			files: [attachment],
+			skillId: skill.id,
+			skillName: skill.name || COST_ESTIMATE_SKILL_KEY,
+			modelId: COST_CHAT_MODEL_ID,
+			codeInterpreterEnabled: COST_CHAT_CODE_INTERPRETER_ENABLED
+		};
+
+		localStorage.setItem(CLARA_TARGET_NOTE_STORAGE_KEY, note.id);
+		sessionStorage.setItem(CLARA_RESULT_BOOTSTRAP_KEY, JSON.stringify(bootstrap));
+		await goto('/clara/result');
+	};
+
+	const handleEstimateAction = async () => {
+		if (estimateActionMode === 'last' && lastEstimateChatIdForNote) {
+			await openLastEstimate();
+			return;
+		}
+
+		await computeEstimateFromNote();
 	};
 
 	const scrollToBottom = () => {
@@ -725,9 +905,25 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 	const onDragOver = (e) => {
 		e.preventDefault();
 
-		// Check if a file is being dragged.
-		if (e.dataTransfer?.types?.includes('Files')) {
-			dragged = true;
+		if (
+			e.dataTransfer?.types?.includes('text/plain') ||
+			e.dataTransfer?.types?.includes('text/html')
+		) {
+			dragged = false;
+			return;
+		}
+
+		// Check if the dragged item is a file or image
+		if (e.dataTransfer?.types?.includes('Files') && e.dataTransfer?.items) {
+			const items = Array.from(e.dataTransfer.items);
+			const hasFiles = items.some((item) => item.kind === 'file');
+			const hasImages = items.some((item) => item.type.startsWith('image/'));
+
+			if (hasFiles && !hasImages) {
+				dragged = true;
+			} else {
+				dragged = false;
+			}
 		} else {
 			dragged = false;
 		}
@@ -757,6 +953,38 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 		inputElement?.insertContent(content);
 	};
 
+	const noteEventHandler = async (_note) => {
+		console.log('noteEventHandler', _note);
+		if (_note.id !== id) return;
+
+		if (_note.access_grants && _note.access_grants !== note.access_grants) {
+			note.access_grants = _note.access_grants;
+		}
+
+		if (_note.data && _note.data.files) {
+			files = _note.data.files;
+			note.data.files = files;
+		}
+
+		if (_note.title && _note.title) {
+			note.title = _note.title;
+		}
+
+		editor.storage.files = files;
+		await tick();
+
+		for (const file of files) {
+			if (file.type === 'image' || (file?.content_type ?? '').startsWith('image/')) {
+				const e = new CustomEvent('data', { files: files });
+
+				const img = document.getElementById(`image:${file.id}`);
+				if (img) {
+					img.dispatchEvent(e);
+				}
+			}
+		}
+	};
+
 	onMount(async () => {
 		await tick();
 
@@ -779,24 +1007,27 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 		}
 
 		if (!selectedModelId) {
-			selectedModelId = $models.at(0)?.id || '';
+			selectedModelId =
+				$models.filter((model) => !(model?.info?.meta?.hidden ?? false)).at(0)?.id || '';
 		}
 
 		const dropzoneElement = document.getElementById('note-editor');
 
-		dropzoneElement?.addEventListener('dragover', onDragOver);
-		dropzoneElement?.addEventListener('drop', onDrop);
-		dropzoneElement?.addEventListener('dragleave', onDragLeave);
+		// dropzoneElement?.addEventListener('dragover', onDragOver);
+		// dropzoneElement?.addEventListener('drop', onDrop);
+		// dropzoneElement?.addEventListener('dragleave', onDragLeave);
 	});
 
 	onDestroy(() => {
 		console.log('destroy');
+		$socket?.off('note-events', noteEventHandler);
+
 		const dropzoneElement = document.getElementById('note-editor');
 
 		if (dropzoneElement) {
-			dropzoneElement?.removeEventListener('dragover', onDragOver);
-			dropzoneElement?.removeEventListener('drop', onDrop);
-			dropzoneElement?.removeEventListener('dragleave', onDragLeave);
+			// dropzoneElement?.removeEventListener('dragover', onDragOver);
+			// dropzoneElement?.removeEventListener('drop', onDrop);
+			// dropzoneElement?.removeEventListener('dragleave', onDragLeave);
 		}
 	});
 </script>
@@ -812,10 +1043,20 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 {#if note}
 	<AccessControlModal
 		bind:show={showAccessControlModal}
-		bind:accessControl={note.access_control}
+		bind:accessGrants={note.access_grants}
 		accessRoles={['read', 'write']}
-		onChange={() => {
-			changeDebounceHandler();
+		share={$user?.permissions?.sharing?.notes || $user?.role === 'admin'}
+		sharePublic={$user?.permissions?.sharing?.public_notes || $user?.role === 'admin'}
+		shareUsers={($user?.permissions?.access_grants?.allow_users ?? true) || $user?.role === 'admin'}
+		onChange={async () => {
+			if (id) {
+				try {
+					await updateNoteAccessGrants(localStorage.token, id, note.access_grants ?? []);
+					toast.success($i18n.t('Saved'));
+				} catch (error) {
+					toast.error(`${error}`);
+				}
+			}
 		}}
 	/>
 {/if}
@@ -847,25 +1088,30 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 			{:else}
 				<div class=" w-full flex flex-col {loading ? 'opacity-20' : ''}">
 					<div class="shrink-0 w-full flex justify-between items-center px-3.5 mb-1.5">
-						<div class="w-full flex items-center">
-							<div
-								class="{$showSidebar
-									? 'md:hidden pl-0.5'
-									: ''} flex flex-none items-center pr-1 -translate-x-1"
-							>
-								<button
-									id="sidebar-toggle-button"
-									class="cursor-pointer p-1.5 flex rounded-xl hover:bg-gray-100 dark:hover:bg-gray-850 transition"
-									on:click={() => {
-										showSidebar.set(!$showSidebar);
-									}}
-									aria-label="Toggle Sidebar"
+						<div class="w-full min-w-0 flex items-center">
+							{#if $mobile}
+								<div
+									class="{$showSidebar
+										? 'md:hidden pl-0.5'
+										: ''} flex flex-none items-center pr-1 -translate-x-1"
 								>
-									<div class=" m-auto self-center">
-										<MenuLines />
-									</div>
-								</button>
-							</div>
+									<Tooltip
+										content={$showSidebar ? $i18n.t('Close Sidebar') : $i18n.t('Open Sidebar')}
+									>
+										<button
+											id="sidebar-toggle-button"
+											class=" cursor-pointer flex rounded-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition cursor-"
+											on:click={() => {
+												showSidebar.set(!$showSidebar);
+											}}
+										>
+											<div class=" self-center p-1.5">
+												<Sidebar />
+											</div>
+										</button>
+									</Tooltip>
+								</div>
+							{/if}
 
 							<input
 								class="w-full text-2xl font-medium bg-transparent outline-hidden"
@@ -875,13 +1121,13 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 								disabled={(note?.user_id !== $user?.id && $user?.role !== 'admin') ||
 									titleGenerating}
 								required
-								on:input={changeDebounceHandler}
 								on:focus={() => {
 									titleInputFocused = true;
 								}}
 								on:blur={(e) => {
 									// check if target is generate button
-									if (e.relatedTarget?.id === 'generate-title-button') {
+									if (ignoreBlur) {
+										ignoreBlur = false;
 										return;
 									}
 
@@ -898,6 +1144,11 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 										<button
 											class=" self-center dark:hover:text-white transition"
 											id="generate-title-button"
+											disabled={(note?.user_id !== $user?.id && $user?.role !== 'admin') ||
+												titleGenerating}
+											on:mouseenter={() => {
+												ignoreBlur = true;
+											}}
 											on:click={(e) => {
 												e.preventDefault();
 												e.stopImmediatePropagation();
@@ -913,70 +1164,72 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 								</div>
 							{/if}
 
-							<div class="flex items-center gap-0.5 translate-x-1">
-								{#if editor}
-									<div>
-										<div class="flex items-center gap-0.5 self-center min-w-fit" dir="ltr">
-											<button
-												class="self-center p-1 hover:enabled:bg-black/5 dark:hover:enabled:bg-white/5 dark:hover:enabled:text-white hover:enabled:text-black rounded-md transition disabled:cursor-not-allowed disabled:text-gray-500 disabled:hover:text-gray-500"
-												on:click={() => {
-													editor.chain().focus().undo().run();
-													// versionNavigateHandler('prev');
-												}}
-												disabled={!editor.can().undo()}
-											>
-												<ArrowUturnLeft className="size-4" />
-											</button>
+							<div class="flex items-center gap-0.5 shrink-0 translate-x-1">
+								{#if note?.write_access}
+									{#if editor}
+										<div>
+											<div class="flex items-center gap-0.5 self-center min-w-fit" dir="ltr">
+												<button
+													class="self-center p-1 hover:enabled:bg-black/5 dark:hover:enabled:bg-white/5 dark:hover:enabled:text-white hover:enabled:text-black rounded-md transition disabled:cursor-not-allowed disabled:text-gray-500 disabled:hover:text-gray-500"
+													on:click={() => {
+														editor.chain().focus().undo().run();
+														// versionNavigateHandler('prev');
+													}}
+													disabled={!editor.can().undo()}
+												>
+													<ArrowUturnLeft className="size-4" />
+												</button>
 
-											<button
-												class="self-center p-1 hover:enabled:bg-black/5 dark:hover:enabled:bg-white/5 dark:hover:enabled:text-white hover:enabled:text-black rounded-md transition disabled:cursor-not-allowed disabled:text-gray-500 disabled:hover:text-gray-500"
-												on:click={() => {
-													editor.chain().focus().redo().run();
-													// versionNavigateHandler('next');
-												}}
-												disabled={!editor.can().redo()}
-											>
-												<ArrowUturnRight className="size-4" />
-											</button>
+												<button
+													class="self-center p-1 hover:enabled:bg-black/5 dark:hover:enabled:bg-white/5 dark:hover:enabled:text-white hover:enabled:text-black rounded-md transition disabled:cursor-not-allowed disabled:text-gray-500 disabled:hover:text-gray-500"
+													on:click={() => {
+														editor.chain().focus().redo().run();
+														// versionNavigateHandler('next');
+													}}
+													disabled={!editor.can().redo()}
+												>
+													<ArrowUturnRight className="size-4" />
+												</button>
+											</div>
 										</div>
-									</div>
+									{/if}
+
+									<Tooltip placement="top" content={$i18n.t('Chat')} className="cursor-pointer">
+										<button
+											class="p-1.5 bg-transparent hover:bg-white/5 transition rounded-lg"
+											on:click={() => {
+												if (showPanel && selectedPanel === 'chat') {
+													showPanel = false;
+												} else {
+													if (!showPanel) {
+														showPanel = true;
+													}
+													selectedPanel = 'chat';
+												}
+											}}
+										>
+											<ChatBubbleOval />
+										</button>
+									</Tooltip>
+
+									<Tooltip placement="top" content={$i18n.t('Controls')} className="cursor-pointer">
+										<button
+											class="p-1.5 bg-transparent hover:bg-white/5 transition rounded-lg"
+											on:click={() => {
+												if (showPanel && selectedPanel === 'settings') {
+													showPanel = false;
+												} else {
+													if (!showPanel) {
+														showPanel = true;
+													}
+													selectedPanel = 'settings';
+												}
+											}}
+										>
+											<AdjustmentsHorizontalOutline />
+										</button>
+									</Tooltip>
 								{/if}
-
-								<Tooltip placement="top" content={$i18n.t('Chat')} className="cursor-pointer">
-									<button
-										class="p-1.5 bg-transparent hover:bg-white/5 transition rounded-lg"
-										on:click={() => {
-											if (showPanel && selectedPanel === 'chat') {
-												showPanel = false;
-											} else {
-												if (!showPanel) {
-													showPanel = true;
-												}
-												selectedPanel = 'chat';
-											}
-										}}
-									>
-										<ChatBubbleOval />
-									</button>
-								</Tooltip>
-
-								<Tooltip placement="top" content={$i18n.t('Settings')} className="cursor-pointer">
-									<button
-										class="p-1.5 bg-transparent hover:bg-white/5 transition rounded-lg"
-										on:click={() => {
-											if (showPanel && selectedPanel === 'settings') {
-												showPanel = false;
-											} else {
-												if (!showPanel) {
-													showPanel = true;
-												}
-												selectedPanel = 'settings';
-											}
-										}}
-									>
-										<Cog6 />
-									</button>
-								</Tooltip>
 
 								<NoteMenu
 									onDownload={(type) => {
@@ -993,7 +1246,11 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 										}
 									}}
 									onCopyToClipboard={async () => {
-										const res = await copyToClipboard(note.data.content.md).catch((error) => {
+										const res = await copyToClipboard(
+											note.data.content.md,
+											note.data.content.html,
+											true
+										).catch((error) => {
 											toast.error(`${error}`);
 											return null;
 										});
@@ -1010,6 +1267,43 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 										<EllipsisHorizontal className="size-5" />
 									</div>
 								</NoteMenu>
+
+								{#if note?.write_access}
+									{#if canOpenClara}
+										<button
+											class="shrink-0 bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm"
+											on:click={openInClara}
+										>
+											<Mic className="size-3.5" strokeWidth="2" />
+											{$i18n.t('Clara')}
+										</button>
+									{/if}
+
+									<button
+										class="shrink-0 transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm {estimateActionMode === 'last' && lastEstimateChatIdForNote
+											? 'bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white'
+											: 'bg-gray-900 hover:bg-gray-800 text-white dark:bg-white dark:text-gray-900 dark:hover:bg-gray-100'}"
+										on:click={handleEstimateAction}
+									>
+										<ArrowRight className="size-3.5" strokeWidth="2" />
+										{$i18n.t(estimateActionMode === 'last' ? 'Last Estimate' : 'Compute Estimate')}
+									</button>
+
+									<button
+										class="shrink-0 bg-gray-50 hover:bg-gray-100 text-black dark:bg-gray-850 dark:hover:bg-gray-800 dark:text-white transition px-2.5 py-1 rounded-full flex gap-1.5 items-center text-sm"
+										on:click={() => {
+											showAccessControlModal = true;
+										}}
+										disabled={note?.user_id !== $user?.id && $user?.role !== 'admin'}
+									>
+										<LockClosed strokeWidth="2.5" className="size-3.5" />
+										{$i18n.t('Access')}
+									</button>
+								{:else}
+									<div class="shrink-0 text-xs text-gray-500 px-2 py-1">
+										{$i18n.t('Read-Only Access')}
+									</div>
+								{/if}
 							</div>
 						</div>
 					</div>
@@ -1025,11 +1319,9 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 							}}
 						>
 							<div
-								class="flex gap-1 items-center text-xs font-medium text-gray-500 dark:text-gray-500 w-fit"
+								class="flex gap-0.5 items-center text-xs font-medium text-gray-500 dark:text-gray-500 w-fit"
 							>
 								<button class=" flex items-center gap-1 w-fit py-1 px-1.5 rounded-lg min-w-fit">
-									<Calendar className="size-3.5" strokeWidth="2" />
-
 									<!-- check for same date, yesterday, last week, and other -->
 
 									{#if dayjs(note.created_at / 1000000).isSame(dayjs(), 'day')}
@@ -1053,18 +1345,6 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 									{/if}
 								</button>
 
-								<button
-									class=" flex items-center gap-1 w-fit py-1 px-1.5 rounded-lg min-w-fit"
-									on:click={() => {
-										showAccessControlModal = true;
-									}}
-									disabled={note?.user_id !== $user?.id && $user?.role !== 'admin'}
-								>
-									<Users className="size-3.5" strokeWidth="2" />
-
-									<span> {note?.access_control ? $i18n.t('Private') : $i18n.t('Everyone')} </span>
-								</button>
-
 								{#if editor}
 									<div class="flex items-center gap-1 px-1 min-w-fit">
 										<div>
@@ -1084,7 +1364,7 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 					</div>
 
 					<div
-						class=" flex-1 w-full h-full overflow-auto px-3.5 pb-20 relative pt-2.5"
+						class=" flex-1 w-full h-full overflow-auto px-3.5 relative"
 						id="note-content-container"
 					>
 						{#if editing}
@@ -1095,54 +1375,38 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 							></div>
 						{/if}
 
-						{#if files && files.length > 0}
-							<div class="mb-2.5 w-full flex gap-1 flex-wrap z-40">
-								{#each files as file, fileIdx}
-									<div class="w-fit">
-										{#if file.type === 'image'}
-											<Image
-												src={file.url}
-												imageClassName=" max-h-96 rounded-lg"
-												dismissible={true}
-												onDismiss={() => {
-													files = files.filter((item, idx) => idx !== fileIdx);
-													note.data.files = files.length > 0 ? files : null;
-												}}
-											/>
-										{:else}
-											<FileItem
-												item={file}
-												dismissible={true}
-												url={file.url}
-												name={file.name}
-												type={file.type}
-												size={file?.size}
-												loading={file.status === 'uploading'}
-												on:dismiss={() => {
-													files = files.filter((item) => item?.id !== file.id);
-													note.data.files = files.length > 0 ? files : null;
-												}}
-											/>
-										{/if}
-									</div>
-								{/each}
-							</div>
-						{/if}
-
 						<RichTextInput
 							bind:this={inputElement}
 							bind:editor
-							className="input-prose-sm px-0.5"
+							id={`note-${note.id}`}
+							className="input-prose-sm px-0.5 h-[calc(100%-2rem)]"
 							json={true}
 							bind:value={note.data.content.json}
-							html={note.data?.content?.html}
+							html={editorHtml}
 							documentId={`note:${note.id}`}
 							collaboration={true}
 							socket={$socket}
 							user={$user}
+							dragHandle={true}
 							link={true}
+							image={true}
+							{files}
 							placeholder={$i18n.t('Write something...')}
-							editable={versionIdx === null && !editing}
+							editable={versionIdx === null && !editing && note?.write_access}
+							onSelectionUpdate={({ editor }) => {
+								const { from, to } = editor.state.selection;
+								const selectedText = editor.state.doc.textBetween(from, to, ' ');
+
+								if (selectedText.length === 0) {
+									selectedContent = null;
+								} else {
+									selectedContent = {
+										text: selectedText,
+										from: from,
+										to: to
+									};
+								}
+							}}
 							onChange={(content) => {
 								note.data.content.html = content.html;
 								note.data.content.md = content.md;
@@ -1152,13 +1416,69 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 									charCount = editor.storage.characterCount.characters();
 								}
 							}}
+							fileHandler={true}
+							onFileDrop={(currentEditor, files, pos) => {
+								files.forEach(async (file) => {
+									const fileItem = await inputFileHandler(file).catch((error) => {
+										return null;
+									});
+
+									if (fileItem.type === 'image') {
+										// If the file is an image, insert it directly
+										currentEditor
+											.chain()
+											.insertContentAt(pos, {
+												type: 'image',
+												attrs: {
+													src: `data://${fileItem.id}`
+												}
+											})
+											.focus()
+											.run();
+									}
+								});
+							}}
+							onFilePaste={() => {}}
+							on:paste={async (e) => {
+								e = e.detail.event || e;
+								const clipboardData = e.clipboardData || window.clipboardData;
+								console.log('Clipboard data:', clipboardData);
+
+								if (clipboardData && clipboardData.items) {
+									console.log('Clipboard data items:', clipboardData.items);
+									for (const item of clipboardData.items) {
+										console.log('Clipboard item:', item);
+										if (item.type.indexOf('image') !== -1) {
+											const blob = item.getAsFile();
+											const fileItem = await inputFileHandler(blob);
+
+											if (editor) {
+												editor
+													?.chain()
+													.insertContentAt(editor.state.selection.$anchor.pos, {
+														type: 'image',
+														attrs: {
+															src: `data://${fileItem.id}` // Use data URI for the image
+														}
+													})
+													.focus()
+													.run();
+											}
+										} else if (item?.kind === 'file') {
+											const file = item.getAsFile();
+											await inputFileHandler(file);
+											e.preventDefault();
+										}
+									}
+								}
+							}}
 						/>
 					</div>
 				</div>
 			{/if}
 		</div>
-		<div class="absolute z-20 bottom-0 right-0 p-3.5 max-w-full w-full flex">
-			<div class="flex gap-1 w-full min-w-full justify-between">
+		<div class="absolute z-50 bottom-0 right-0 p-3.5 flex select-none">
+			<div class="flex flex-col gap-2 justify-end">
 				{#if recording}
 					<div class="flex-1 w-full">
 						<VoiceRecording
@@ -1183,6 +1503,39 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 						/>
 					</div>
 				{:else}
+					<div
+						class="cursor-pointer flex gap-0.5 rounded-full border border-gray-50 dark:border-gray-850/30 dark:bg-gray-850 transition shadow-xl"
+					>
+						<Tooltip content={$i18n.t('AI')} placement="top">
+							{#if editing}
+								<button
+									class="p-2 flex justify-center items-center hover:bg-gray-50 dark:hover:bg-gray-800 rounded-full transition shrink-0"
+									on:click={() => {
+										stopResponseHandler();
+									}}
+									type="button"
+								>
+									<Spinner className="size-5" />
+								</button>
+							{:else}
+								<AiMenu
+									onEdit={() => {
+										enhanceNoteHandler();
+									}}
+									onChat={() => {
+										showPanel = true;
+										selectedPanel = 'chat';
+									}}
+								>
+									<div
+										class="cursor-pointer p-2.5 flex rounded-full border border-gray-50 bg-white dark:border-none dark:bg-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition shadow-xl"
+									>
+										<SparklesSolid />
+									</div>
+								</AiMenu>
+							{/if}
+						</Tooltip>
+					</div>
 					<RecordMenu
 						onRecord={async () => {
 							displayMediaRecord = false;
@@ -1238,40 +1591,6 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 							</div>
 						</Tooltip>
 					</RecordMenu>
-
-					<div
-						class="cursor-pointer flex gap-0.5 rounded-full border border-gray-50 dark:border-gray-850 dark:bg-gray-850 transition shadow-xl"
-					>
-						<Tooltip content={$i18n.t('AI')} placement="top">
-							{#if editing}
-								<button
-									class="p-2 flex justify-center items-center hover:bg-gray-50 dark:hover:bg-gray-800 rounded-full transition shrink-0"
-									on:click={() => {
-										stopResponseHandler();
-									}}
-									type="button"
-								>
-									<Spinner className="size-5" />
-								</button>
-							{:else}
-								<AiMenu
-									onEdit={() => {
-										enhanceNoteHandler();
-									}}
-									onChat={() => {
-										showPanel = true;
-										selectedPanel = 'chat';
-									}}
-								>
-									<div
-										class="cursor-pointer p-2.5 flex rounded-full border border-gray-50 bg-white dark:border-none dark:bg-gray-850 hover:bg-gray-50 dark:hover:bg-gray-800 transition shadow-xl"
-									>
-										<SparklesSolid />
-									</div>
-								</AiMenu>
-							{/if}
-						</Tooltip>
-					</div>
 				{/if}
 			</div>
 		</div>
@@ -1286,6 +1605,9 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 				bind:editing
 				bind:streaming
 				bind:stopResponseFlag
+				{editor}
+				{inputElement}
+				{selectedContent}
 				{files}
 				onInsert={insertHandler}
 				onStop={stopResponseHandler}
@@ -1296,7 +1618,14 @@ Provide the enhanced notes in markdown format. Use markdown syntax for headings,
 				scrollToBottomHandler={scrollToBottom}
 			/>
 		{:else if selectedPanel === 'settings'}
-			<Settings bind:show={showPanel} bind:selectedModelId />
+			<Controls
+				bind:show={showPanel}
+				bind:selectedModelId
+				bind:files
+				onUpdate={() => {
+					changeDebounceHandler();
+				}}
+			/>
 		{/if}
 	</NotePanel>
 </PaneGroup>
