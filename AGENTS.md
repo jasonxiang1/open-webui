@@ -283,7 +283,7 @@ Before adding new recording endpoints, check whether:
   - `src/lib/components/clara/ClaraNotePicker.svelte`
 
 Clara currently has two linked behaviors:
-- record audio, transcribe it with the built-in STT flow, and append into a selected note
+- record audio, upload/transcribe it incrementally through session-based STT endpoints while recording, and append the finalized transcript into a selected note
 - generate a one-shot estimate view from that selected note while saving the underlying exchange as a normal chat in the background
 - reopen a saved estimate later from either the originating chat or the originating note, without recomputing
 
@@ -303,12 +303,33 @@ const CLARA_LATEST_ESTIMATE_CHAT_ID_KEY = 'clara-latest-estimate-chat-id';
 const CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY = 'clara-note-estimate-chat-ids';
 ```
 
+Important Clara recorder constants currently used by this flow:
+
+```ts
+const CLARA_CHUNK_TIMESLICE_MS = 10000;
+```
+
 Behavior notes:
 - the lower-left control selects or creates the target note used by Clara
+- Clara does not display interim chunk transcripts in the UI; the user-facing transcript result is the finalized note append
+- the note itself is not mutated until transcript finalization succeeds
+- Clara now uses incremental transcription session endpoints from `src/lib/apis/audio/index.ts` / `backend/open_webui/routers/audio.py` instead of waiting for a single post-stop `transcribeAudio(...)` upload
+- the session endpoints are:
+  - `POST /api/v1/audio/transcriptions/sessions`
+  - `POST /api/v1/audio/transcriptions/sessions/{session_id}/chunks`
+  - `POST /api/v1/audio/transcriptions/sessions/{session_id}/finalize`
+  - `DELETE /api/v1/audio/transcriptions/sessions/{session_id}`
 - the lower-right action opens the dedicated Clara result page using `COST_CHAT_MODEL_ID`
 - the selected note is still passed as a normal chat note attachment shape, not through a new backend API
 - the skill is invoked through the existing skill-mention flow, using the resolved skill id and `COST_ESTIMATE_SKILL_KEY`
 - the handoff to the result page does not rely on URL params alone; it uses `sessionStorage` bootstrap state keyed by `CLARA_RESULT_BOOTSTRAP_KEY`
+- the recorder lifecycle is now:
+  - create transcription session
+  - start `MediaRecorder` with a 10s timeslice
+  - upload chunks sequentially while recording
+  - backend transcribes the cumulative session audio because later `MediaRecorder` WebM slices are not guaranteed to be standalone-decodable files
+  - wait for the chunk upload queue to drain on stop before finalizing the session
+  - append finalized transcript into the note
 - the result page creates the estimate request directly, saves the underlying exchange as a normal chat, and renders either:
   - an interactive structured estimate view when line-item/totals tables can be parsed
   - a cleaned markdown/content fallback view when structured parsing is unavailable
@@ -410,6 +431,7 @@ Chat and note integration notes:
 When changing this feature:
 - keep the note attachment shape compatible with normal chat note attachments
 - do not introduce a parallel backend endpoint for starting the estimate flow unless the existing bootstrap path is proven insufficient
+- for recorder changes, prefer the audio transcription session endpoints over adding Clara-only backend APIs
 - verify the state transfer into the result page:
   - selected model bootstrap
   - note + prompt + skill bootstrap
@@ -421,6 +443,13 @@ When changing this feature:
   - whether the note-scoped chat id mapping in `CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY` is current
   - whether the saved chat still contains valid `claraEstimate` metadata
   - whether the current note body fingerprint still matches the saved snapshot
+- if incremental recording feels stuck, check these before changing backend/provider logic:
+  - whether Clara still has an active transcription session id
+  - whether chunk sequence numbers are arriving monotonically with no skips/duplicates
+  - whether chunk uploads are draining sequentially rather than overlapping
+  - whether the backend is rebuilding cumulative session audio before STT rather than decoding each later WebM slice independently
+  - whether finalize is being called only after the upload queue is empty
+  - whether abandoned transcription session temp files are being cleaned up from `CACHE_DIR/audio/transcription_sessions`
 - keep Clara itself minimal; prefer putting note-specific estimate actions on the note page instead of adding more controls to the Clara recorder screen
 
 ### Sidebar / navigation features

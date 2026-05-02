@@ -5,6 +5,9 @@ import os
 import uuid
 import html
 import base64
+import shutil
+import threading
+import time
 from functools import lru_cache
 from pydub import AudioSegment
 from pydub.silence import split_on_silence
@@ -65,11 +68,17 @@ MAX_FILE_SIZE_MB = 20
 MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
 AZURE_MAX_FILE_SIZE_MB = 200
 AZURE_MAX_FILE_SIZE = AZURE_MAX_FILE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
+TRANSCRIPTION_SESSION_TTL_SECONDS = int(os.getenv('STT_SESSION_TTL_SECONDS', '1800'))
 
 log = logging.getLogger(__name__)
 
 SPEECH_CACHE_DIR = CACHE_DIR / 'audio' / 'speech'
 SPEECH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TRANSCRIPTION_SESSIONS_DIR = CACHE_DIR / 'audio' / 'transcription_sessions'
+TRANSCRIPTION_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+TRANSCRIPTION_SESSIONS: dict[str, dict] = {}
+TRANSCRIPTION_SESSIONS_LOCK = threading.Lock()
 
 
 ##########################################
@@ -193,6 +202,29 @@ class AudioConfigUpdateForm(BaseModel):
     stt: STTConfigForm
 
 
+class TranscriptionSessionCreateForm(BaseModel):
+    language: Optional[str] = None
+
+
+class TranscriptionSessionResponse(BaseModel):
+    sessionId: str
+    expiresAt: int
+
+
+class TranscriptionChunkResponse(BaseModel):
+    sessionId: str
+    sequenceNumber: int
+    deltaText: str
+    fullText: str
+    processedChunks: int
+
+
+class TranscriptionFinalizeResponse(BaseModel):
+    sessionId: str
+    text: str
+    processedChunks: int
+
+
 @router.get('/config')
 async def get_audio_config(request: Request, user=Depends(get_admin_user)):
     return {
@@ -312,6 +344,135 @@ def load_speech_pipeline(request):
         request.app.state.speech_speaker_embeddings_dataset = load_dataset(
             'Matthijs/cmu-arctic-xvectors', split='validation'
         )
+
+
+def _get_transcription_session_expiry(now: Optional[int] = None) -> int:
+    return int((now or time.time()) + TRANSCRIPTION_SESSION_TTL_SECONDS)
+
+
+def _cleanup_transcription_session_dir(session_dir: str):
+    try:
+        shutil.rmtree(session_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def cleanup_expired_transcription_sessions():
+    now = int(time.time())
+    expired_sessions: list[dict] = []
+
+    with TRANSCRIPTION_SESSIONS_LOCK:
+        expired_ids = [
+            session_id
+            for session_id, session in TRANSCRIPTION_SESSIONS.items()
+            if session.get('last_seen_at', 0) + TRANSCRIPTION_SESSION_TTL_SECONDS < now
+        ]
+
+        for session_id in expired_ids:
+            expired_sessions.append(TRANSCRIPTION_SESSIONS.pop(session_id))
+
+    for session in expired_sessions:
+        _cleanup_transcription_session_dir(session['dir'])
+
+
+def create_transcription_session(user_id: str, language: Optional[str] = None) -> dict:
+    cleanup_expired_transcription_sessions()
+
+    session_id = str(uuid.uuid4())
+    session_dir = TRANSCRIPTION_SESSIONS_DIR / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    now = int(time.time())
+
+    session = {
+        'id': session_id,
+        'user_id': user_id,
+        'language': language,
+        'created_at': now,
+        'last_seen_at': now,
+        'next_sequence_number': 0,
+        'accumulated_text': '',
+        'processed_chunks': 0,
+        'closed': False,
+        'dir': str(session_dir),
+    }
+
+    with TRANSCRIPTION_SESSIONS_LOCK:
+        TRANSCRIPTION_SESSIONS[session_id] = session
+
+    return session
+
+
+def get_transcription_session(session_id: str, user_id: str, allow_closed: bool = False) -> dict:
+    cleanup_expired_transcription_sessions()
+
+    with TRANSCRIPTION_SESSIONS_LOCK:
+        session = TRANSCRIPTION_SESSIONS.get(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail='Transcription session not found.',
+            )
+
+        if session['user_id'] != user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+            )
+
+        if session['closed'] and not allow_closed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Transcription session is closed.',
+            )
+
+        session['last_seen_at'] = int(time.time())
+        return dict(session)
+
+
+def update_transcription_session(session_id: str, **updates) -> dict:
+    with TRANSCRIPTION_SESSIONS_LOCK:
+        session = TRANSCRIPTION_SESSIONS.get(session_id)
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail='Transcription session not found.',
+            )
+
+        session.update(updates)
+        session['last_seen_at'] = int(time.time())
+        return dict(session)
+
+
+def build_transcription_session_audio(session_dir: str, ext: str) -> str:
+    chunk_paths = [
+        os.path.join(session_dir, name)
+        for name in sorted(os.listdir(session_dir))
+        if name.startswith('chunk-') and name.endswith(f'.{ext}')
+    ]
+    combined_path = os.path.join(session_dir, f'combined.{ext}')
+
+    with open(combined_path, 'wb') as combined:
+        for chunk_path in chunk_paths:
+            with open(chunk_path, 'rb') as chunk:
+                shutil.copyfileobj(chunk, combined)
+
+    return combined_path
+
+
+def get_transcription_delta(previous_text: str, current_text: str) -> str:
+    previous_text = previous_text.strip()
+    current_text = current_text.strip()
+    if previous_text and current_text.startswith(previous_text):
+        return current_text[len(previous_text) :].strip()
+    return current_text if current_text != previous_text else ''
+
+
+def close_transcription_session(session_id: str) -> Optional[dict]:
+    with TRANSCRIPTION_SESSIONS_LOCK:
+        session = TRANSCRIPTION_SESSIONS.pop(session_id, None)
+        if session:
+            session['closed'] = True
+        return session
 
 
 @router.post('/speech')
@@ -1019,6 +1180,11 @@ def transcribe(request: Request, file_path: str, metadata: Optional[dict] = None
 
     if is_audio_conversion_required(file_path):
         file_path = convert_audio_to_mp3(file_path)
+        if not file_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail='Audio conversion failed.',
+            )
 
     try:
         file_path = compress_audio(file_path)
@@ -1127,6 +1293,152 @@ def split_audio(file_path, max_bytes, format='mp3', bitrate='32k'):
         i += 1
 
     return chunks
+
+
+@router.post('/transcriptions/sessions', response_model=TranscriptionSessionResponse)
+def create_transcription_session_endpoint(
+    request: Request,
+    form_data: Optional[TranscriptionSessionCreateForm] = None,
+    user=Depends(get_verified_user),
+):
+    if user.role != 'admin' and not has_permission(user.id, 'chat.stt', request.app.state.config.USER_PERMISSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    session = create_transcription_session(user.id, form_data.language if form_data else None)
+    return {
+        'sessionId': session['id'],
+        'expiresAt': _get_transcription_session_expiry(session['last_seen_at']),
+    }
+
+
+@router.post('/transcriptions/sessions/{session_id}/chunks', response_model=TranscriptionChunkResponse)
+def upload_transcription_chunk(
+    request: Request,
+    session_id: str,
+    file: UploadFile = File(...),
+    sequence_number: int = Form(...),
+    is_last: bool = Form(False),
+    user=Depends(get_verified_user),
+):
+    del is_last
+
+    if user.role != 'admin' and not has_permission(user.id, 'chat.stt', request.app.state.config.USER_PERMISSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    session = get_transcription_session(session_id, user.id)
+    if sequence_number != session['next_sequence_number']:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Unexpected transcription chunk sequence number.',
+        )
+
+    stt_supported_content_types = getattr(request.app.state.config, 'STT_SUPPORTED_CONTENT_TYPES', [])
+    if not strict_match_mime_type(stt_supported_content_types, file.content_type):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.FILE_NOT_SUPPORTED,
+        )
+
+    safe_name = os.path.basename(file.filename) if file.filename else f'chunk-{sequence_number}.webm'
+    ext = safe_name.rsplit('.', 1)[-1] if '.' in safe_name else 'webm'
+    chunk_name = f'chunk-{sequence_number:06d}.{ext}'
+    chunk_path = os.path.join(session['dir'], chunk_name)
+
+    if not os.path.realpath(chunk_path).startswith(os.path.realpath(session['dir'])):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Invalid file path detected.',
+        )
+
+    with open(chunk_path, 'wb') as f:
+        f.write(file.file.read())
+
+    metadata = {'language': session['language']} if session.get('language') else None
+    transcription_path = build_transcription_session_audio(session['dir'], ext)
+
+    try:
+        result = transcribe(request, transcription_path, metadata, user)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception(e)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='Transcription failed.',
+        )
+
+    full_text = (result.get('text') or '').strip()
+    delta_text = get_transcription_delta(session['accumulated_text'], full_text)
+
+    session = update_transcription_session(
+        session_id,
+        accumulated_text=full_text,
+        processed_chunks=session['processed_chunks'] + 1,
+        next_sequence_number=sequence_number + 1,
+    )
+
+    return {
+        'sessionId': session_id,
+        'sequenceNumber': sequence_number,
+        'deltaText': delta_text,
+        'fullText': session['accumulated_text'],
+        'processedChunks': session['processed_chunks'],
+    }
+
+
+@router.post('/transcriptions/sessions/{session_id}/finalize', response_model=TranscriptionFinalizeResponse)
+def finalize_transcription_session(
+    request: Request,
+    session_id: str,
+    user=Depends(get_verified_user),
+):
+    if user.role != 'admin' and not has_permission(user.id, 'chat.stt', request.app.state.config.USER_PERMISSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    session = get_transcription_session(session_id, user.id)
+    if session['processed_chunks'] == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail='No transcription chunks were uploaded.',
+        )
+
+    session = update_transcription_session(session_id, closed=True)
+    closed_session = close_transcription_session(session_id) or session
+    _cleanup_transcription_session_dir(closed_session['dir'])
+
+    return {
+        'sessionId': session_id,
+        'text': session['accumulated_text'],
+        'processedChunks': session['processed_chunks'],
+    }
+
+
+@router.delete('/transcriptions/sessions/{session_id}')
+def cancel_transcription_session(
+    request: Request,
+    session_id: str,
+    user=Depends(get_verified_user),
+):
+    if user.role != 'admin' and not has_permission(user.id, 'chat.stt', request.app.state.config.USER_PERMISSIONS):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=ERROR_MESSAGES.ACCESS_PROHIBITED,
+        )
+
+    session = get_transcription_session(session_id, user.id, allow_closed=True)
+    closed_session = close_transcription_session(session_id) or session
+    _cleanup_transcription_session_dir(closed_session['dir'])
+
+    return True
 
 
 @router.post('/transcriptions')

@@ -5,8 +5,13 @@
 	import { marked } from 'marked';
 
 	import dayjs from '$lib/dayjs';
-	import { config, models, showSidebar, user } from '$lib/stores';
-	import { transcribeAudio } from '$lib/apis/audio';
+	import { config, models, settings, showSidebar, user } from '$lib/stores';
+	import {
+		cancelTranscriptionSession,
+		createTranscriptionSession,
+		finalizeTranscriptionSession,
+		uploadTranscriptionChunk
+	} from '$lib/apis/audio';
 	import { getNoteById, updateNoteById } from '$lib/apis/notes';
 	import { getSkills } from '$lib/apis/skills';
 	import Mic from '$lib/components/icons/Mic.svelte';
@@ -15,10 +20,22 @@
 	import ChatPlus from '$lib/components/icons/ChatPlus.svelte';
 	import ClaraNotePicker from '$lib/components/clara/ClaraNotePicker.svelte';
 
-	type RecorderStatus = 'idle' | 'recording' | 'transcribing' | 'saving' | 'success' | 'error';
+	type RecorderStatus =
+		| 'idle'
+		| 'recording'
+		| 'uploading'
+		| 'finalizing'
+		| 'saving'
+		| 'success'
+		| 'error';
 	type SelectedNote = {
 		id: string;
 		title: string;
+	};
+	type PendingChunk = {
+		blob: Blob;
+		sequenceNumber: number;
+		isLast: boolean;
 	};
 	type SkillItem = {
 		id: string;
@@ -49,6 +66,7 @@
 	const COST_CHAT_MODEL_ID = 'models/gemini-3.1-flash-lite-preview';
 	const COST_ESTIMATE_SKILL_KEY = 'calculate-estimate';
 	const COST_CHAT_CODE_INTERPRETER_ENABLED = false;
+	const CLARA_CHUNK_TIMESLICE_MS = 10000;
 	const MIME_TYPES = ['audio/webm;codecs=opus', 'audio/webm; codecs=opus', 'audio/mp4'];
 
 	let loaded = false;
@@ -59,11 +77,20 @@
 
 	let mediaRecorder: MediaRecorder | null = null;
 	let stream: MediaStream | null = null;
-	let audioChunks: Blob[] = [];
+	let sessionId: string | null = null;
+	let pendingChunks: PendingChunk[] = [];
+	let uploadedChunkCount = 0;
+	let partialTranscript = '';
+	let uploadError = '';
+	let nextSequenceNumber = 0;
+	let stopRequested = false;
+	let uploadQueueRunning = false;
+	let uploadQueuePromise: Promise<void> | null = null;
 
-	const canRecord = () => status === 'idle' || status === 'success' || status === 'error';
+	const canRecord = () => ['idle', 'success', 'error'].includes(status);
 	const canStartCostChat = () =>
-		!!selectedNote && !['recording', 'transcribing', 'saving'].includes(status);
+		!!selectedNote && !['recording', 'uploading', 'finalizing', 'saving'].includes(status);
+	const hasRecorderError = () => status === 'error';
 	const clearReplacedFeatureStorage = () => {
 		const replacedFeaturePrefix = ['field', 'boss'].join('-');
 		[
@@ -98,11 +125,44 @@
 
 	const resetRecorder = () => {
 		mediaRecorder = null;
-		audioChunks = [];
 		stopStream();
 	};
 
-	const setSelectedNote = (note) => {
+	const resetStreamingState = () => {
+		sessionId = null;
+		pendingChunks = [];
+		uploadedChunkCount = 0;
+		partialTranscript = '';
+		nextSequenceNumber = 0;
+		stopRequested = false;
+		uploadQueueRunning = false;
+		uploadQueuePromise = null;
+		uploadError = '';
+	};
+
+	const buildChunkFile = (blob: Blob, sequenceNumber: number) => {
+		const ext = (blob.type.split('/')[1] || 'webm').split(';')[0];
+		return new File([blob], `clara-chunk-${sequenceNumber}.${ext}`, {
+			type: blob.type || 'audio/webm'
+		});
+	};
+
+	const isRecorderBusy = () => ['recording', 'uploading', 'finalizing'].includes(status);
+
+	const cancelActiveSession = async () => {
+		const activeSessionId = sessionId;
+		resetRecorder();
+		resetStreamingState();
+		if (!activeSessionId) return;
+
+		await cancelTranscriptionSession(localStorage.token, activeSessionId).catch(() => null);
+	};
+
+	const setSelectedNote = async (note) => {
+		if (isRecorderBusy()) {
+			await cancelActiveSession();
+		}
+
 		selectedNote = {
 			id: note.id,
 			title: note.title || $i18n.t('Untitled')
@@ -124,7 +184,7 @@
 			return;
 		}
 
-		setSelectedNote(note);
+		await setSelectedNote(note);
 	};
 
 	const persistTranscript = async (transcript: string) => {
@@ -177,7 +237,8 @@
 			return;
 		}
 
-		setSelectedNote(res);
+		resetStreamingState();
+		await setSelectedNote(res);
 		status = 'success';
 		statusMessage = $i18n.t('Appended transcript to {{title}}.', { title: res.title });
 	};
@@ -256,50 +317,119 @@
 		await goto('/clara/result');
 	};
 
-	const handleAudioBlob = async (audioBlob: Blob) => {
-		const ext = (audioBlob.type.split('/')[1] || 'webm').split(';')[0];
-		const file = new File([audioBlob], `clara-${dayjs().format('YYYYMMDD-HHmmss')}.${ext}`, {
-			type: audioBlob.type || 'audio/webm'
-		});
+	const failStreamingSession = async (message: string, error?: unknown) => {
+		console.error(error);
+		await cancelActiveSession();
+		uploadError = message;
+		status = 'error';
+		statusMessage = message;
+		toast.error(message);
+	};
 
-		status = 'transcribing';
-		statusMessage = $i18n.t('Transcribing audio...');
+	const flushUploadQueue = async () => {
+		if (uploadQueueRunning) return uploadQueuePromise;
+		if (!sessionId) return;
+		uploadQueueRunning = true;
 
-		const result = await transcribeAudio(localStorage.token, file).catch((error) => {
-			toast.error(`${error}`);
-			return null;
-		});
+		uploadQueuePromise = (async () => {
+			while (pendingChunks.length > 0) {
+				const [chunk, ...rest] = pendingChunks;
+				pendingChunks = rest;
 
-		if (!result?.text?.trim()) {
+				const result = await uploadTranscriptionChunk(
+					localStorage.token,
+					sessionId,
+					buildChunkFile(chunk.blob, chunk.sequenceNumber),
+					{
+						sequenceNumber: chunk.sequenceNumber,
+						isLast: chunk.isLast
+					}
+				).catch((error) => {
+					throw error;
+				});
+
+				uploadedChunkCount = result?.processedChunks ?? uploadedChunkCount + 1;
+				partialTranscript = result?.fullText ?? partialTranscript;
+				if (!stopRequested) {
+					statusMessage = $i18n.t('Recording into {{title}}. Tap again to stop.', {
+						title: selectedNote?.title ?? $i18n.t('Clara')
+					});
+				}
+			}
+		})()
+			.catch(async (error) => {
+				await failStreamingSession(
+					$i18n.t('Unable to upload transcript chunks for this recording.'),
+					error
+				);
+			})
+			.finally(() => {
+				uploadQueueRunning = false;
+				uploadQueuePromise = null;
+			});
+
+		return uploadQueuePromise;
+	};
+
+	const finalizeRecording = async () => {
+		if (!sessionId) {
 			status = 'error';
-			statusMessage = $i18n.t('Transcription failed.');
+			statusMessage = $i18n.t('Transcription session is unavailable.');
 			return;
 		}
 
+		if (nextSequenceNumber === 0) {
+			await cancelActiveSession();
+			status = 'error';
+			statusMessage = $i18n.t('No audio was captured.');
+			return;
+		}
+
+		status = 'finalizing';
+		statusMessage = $i18n.t('Finalizing transcript...');
+
+		const activeSessionId = sessionId;
+		const result = await finalizeTranscriptionSession(localStorage.token, activeSessionId).catch(
+			(error) => {
+				console.error(error);
+				return null;
+			}
+		);
+
+		if (!result?.text?.trim()) {
+			sessionId = activeSessionId;
+			status = 'error';
+			statusMessage = $i18n.t('Unable to finalize this transcript.');
+			toast.error($i18n.t('Unable to finalize this transcript.'));
+			return;
+		}
+
+		sessionId = null;
 		await persistTranscript(result.text);
 	};
 
 	const stopRecording = async () => {
 		if (status !== 'recording' || !mediaRecorder) return;
 
+		stopRequested = true;
+		status = 'uploading';
+		statusMessage = $i18n.t('Uploading transcript chunks...');
+
 		const recorder = mediaRecorder;
-		const audioBlob = await new Promise<Blob | null>((resolve) => {
+		await new Promise<void>((resolve) => {
 			recorder.onstop = () => {
-				const mimeType = audioChunks[0]?.type || recorder.mimeType || 'audio/webm';
-				resolve(audioChunks.length ? new Blob(audioChunks, { type: mimeType }) : null);
+				resolve();
 			};
 			recorder.stop();
 		});
 
 		resetRecorder();
 
-		if (!audioBlob) {
-			status = 'error';
-			statusMessage = $i18n.t('No audio was captured.');
-			return;
-		}
+		if (hasRecorderError()) return;
 
-		await handleAudioBlob(audioBlob);
+		await flushUploadQueue();
+		if (hasRecorderError()) return;
+		await finalizeRecording();
 	};
 
 	const startRecording = async () => {
@@ -308,6 +438,28 @@
 			statusMessage = $i18n.t('Select or create a note before recording.');
 			return;
 		}
+
+		if (sessionId) {
+			await cancelActiveSession();
+		}
+
+		resetStreamingState();
+		partialTranscript = '';
+
+		const createdSession = await createTranscriptionSession(localStorage.token, {
+			language: $settings?.audio?.stt?.language
+		}).catch((error) => {
+			toast.error(`${error}`);
+			return null;
+		});
+
+		if (!createdSession?.sessionId) {
+			status = 'error';
+			statusMessage = $i18n.t('Unable to start a transcription session.');
+			return;
+		}
+
+		sessionId = createdSession.sessionId;
 
 		try {
 			stream = await navigator.mediaDevices.getUserMedia({
@@ -322,19 +474,29 @@
 			status = 'error';
 			statusMessage = $i18n.t('Error accessing media devices.');
 			toast.error($i18n.t('Error accessing media devices.'));
+			await cancelActiveSession();
 			return;
 		}
 
-		audioChunks = [];
 		const mimeType = MIME_TYPES.find((type) => MediaRecorder.isTypeSupported(type));
 		mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
-		mediaRecorder.ondataavailable = (event) => {
+
+		mediaRecorder.ondataavailable = async (event) => {
 			if (event.data?.size) {
-				audioChunks.push(event.data);
+				pendingChunks = [
+					...pendingChunks,
+					{
+						blob: event.data,
+						sequenceNumber: nextSequenceNumber,
+						isLast: stopRequested && mediaRecorder?.state === 'inactive'
+					}
+				];
+				nextSequenceNumber += 1;
+				await flushUploadQueue();
 			}
 		};
 
-		mediaRecorder.start();
+		mediaRecorder.start(CLARA_CHUNK_TIMESLICE_MS);
 		status = 'recording';
 		statusMessage = $i18n.t('Recording into {{title}}. Tap again to stop.', {
 			title: selectedNote.title
@@ -375,7 +537,14 @@
 
 	onDestroy(() => {
 		if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-			mediaRecorder.stop();
+			try {
+				mediaRecorder.stop();
+			} catch (error) {
+				console.error(error);
+			}
+		}
+		if (sessionId) {
+			cancelTranscriptionSession(localStorage.token, sessionId).catch(() => null);
 		}
 		resetRecorder();
 	});
@@ -401,7 +570,7 @@
 							? 'bg-red-600 border-red-500 text-white scale-105'
 							: 'bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800 text-gray-900 dark:text-gray-100 hover:scale-[1.02]'}"
 					on:click={toggleRecording}
-					disabled={!selectedNote || ['transcribing', 'saving'].includes(status)}
+					disabled={!selectedNote || ['uploading', 'finalizing', 'saving'].includes(status)}
 					aria-label={status === 'recording' ? $i18n.t('Stop Recording') : $i18n.t('Record')}
 				>
 					<div class="flex flex-col items-center gap-3">
@@ -409,7 +578,7 @@
 						<div class="text-xl md:text-2xl font-medium">
 							{#if status === 'recording'}
 								{$i18n.t('Stop Recording')}
-							{:else if ['transcribing', 'saving'].includes(status)}
+							{:else if ['uploading', 'finalizing', 'saving'].includes(status)}
 								{$i18n.t('Processing...')}
 							{:else}
 								{$i18n.t('Record')}
@@ -423,9 +592,6 @@
 						{statusMessage}
 					</div>
 					{#if selectedNote}
-						<div class="text-xs md:text-sm text-gray-500 dark:text-gray-400">
-							{$i18n.t('Target note')}: {selectedNote.title}
-						</div>
 					{:else}
 						<button
 							class="mt-3 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 px-4 py-3 shadow-lg hover:bg-gray-100 dark:hover:bg-gray-850 transition"
@@ -454,6 +620,7 @@
 					on:click={() => {
 						showNotePicker = true;
 					}}
+					disabled={isRecorderBusy()}
 				>
 					<div class="flex items-center gap-3 text-left">
 						<NoteIcon className="size-4.5 shrink-0" />
