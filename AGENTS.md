@@ -99,9 +99,10 @@ Important:
 - `package-lock.json` may change after reinstalling dependencies
 
 ### Backend
-From repo root, after activating a Python 3.11 environment:
+From repo root, after activating the local `open-webui` conda environment:
 
 ```bash
+conda activate open-webui
 pip install -r backend/requirements.txt
 cd backend
 sh dev.sh
@@ -110,12 +111,13 @@ sh dev.sh
 Canonical backend run command:
 
 ```bash
+conda activate open-webui
 cd backend/ && sh dev.sh
 ```
 
 `backend/dev.sh` starts uvicorn with reload on port `8080` and allows `http://localhost:5173`.
 
-If running backend directly from source, missing Python packages are a common issue. `starsessions[redis]` is required by startup.
+If running backend directly from source, missing Python packages are a common issue. `starsessions[redis]` and `aiosqlite==0.21.0` are required by startup after the async SQLAlchemy update.
 
 ## Required Run-And-Debug Loop
 For local feature work, agents should treat these as the baseline execution commands:
@@ -129,6 +131,7 @@ nvm use v22.17.1 && npm run dev
 Backend:
 
 ```bash
+conda activate open-webui
 cd backend/ && sh dev.sh
 ```
 
@@ -237,6 +240,13 @@ Some backend routes expect a favicon fallback. In local dev, missing backend sta
 ### Notes update compatibility
 Some older notes can have `meta = null` or `data = null`. Backend and frontend note updates should defensively treat those as dict-like objects, not assume mappings are always present.
 
+In the async notes model, preserve null-safe merges when updating notes:
+
+```python
+note.data = {**(note.data or {}), **form_data['data']}
+note.meta = {**(note.meta or {}), **form_data['meta']}
+```
+
 ### Record/voice features are often blocked by UX state, not STT itself
 If recording appears “not working”, first verify:
 - mic permission was granted
@@ -282,6 +292,8 @@ Before adding new recording endpoints, check whether:
 - Related picker:
   - `src/lib/components/clara/ClaraNotePicker.svelte`
 
+Clara is an intentional local feature. If a future upstream merge deletes Clara files or behavior, preserve Clara by reapplying the local integration on top of upstream structures rather than reverting broad upstream platform changes.
+
 Clara currently has two linked behaviors:
 - record audio, upload/transcribe it incrementally through session-based STT endpoints while recording, and append the finalized transcript into a selected note
 - generate a one-shot estimate view from that selected note while saving the underlying exchange as a normal chat in the background
@@ -319,6 +331,12 @@ Behavior notes:
   - `POST /api/v1/audio/transcriptions/sessions/{session_id}/chunks`
   - `POST /api/v1/audio/transcriptions/sessions/{session_id}/finalize`
   - `DELETE /api/v1/audio/transcriptions/sessions/{session_id}`
+- the backend session routes should follow the current async audio style:
+  - route handlers should be `async def` where they await request/file/permission work
+  - permission checks should use `await has_permission(...)`
+  - uploads should use `await file.read()`
+  - blocking `transcribe(...)` calls should run through `asyncio.to_thread(...)`
+  - keep upstream `BYPASS_PYDUB_PREPROCESSING`, `STT_ALLOWED_EXTENSIONS`, async `/transcriptions`, and non-blocking STT behavior
 - the lower-right action opens the dedicated Clara result page using `COST_CHAT_MODEL_ID`
 - the selected note is still passed as a normal chat note attachment shape, not through a new backend API
 - the skill is invoked through the existing skill-mention flow, using the resolved skill id and `COST_ESTIMATE_SKILL_KEY`
@@ -417,6 +435,7 @@ Important implementation/debugging notes for the result page:
 
 Chat and note integration notes:
 - the regular chat composer can show a bottom-right `Estimate` action, but it is intentionally enabled only for the single globally latest estimate-backed chat, using `CLARA_LATEST_ESTIMATE_CHAT_ID_KEY`
+- the `Estimate` action should coexist with upstream chat task/queue active-state handling; do not remove task UI or queue behavior to restore the Clara affordance
 - notes use a separate note-scoped lookup via `CLARA_NOTE_ESTIMATE_CHAT_IDS_KEY`, mapping `noteId -> latest estimate chat id for that note`
 - the note detail page (`src/lib/components/notes/NoteEditor.svelte`) owns the primary estimate-return affordance for a note
 - the note header estimate button is adaptive:
@@ -457,10 +476,28 @@ When changing this feature:
   - `src/lib/components/layout/Sidebar.svelte`
   - `src/lib/components/app/AppSidebar.svelte`
 
+The current sidebar uses upstream's pinned-menu metadata rather than only hardcoded links. Clara should remain a pinned menu item:
+- default pinned menu order: `['notes', 'clara', 'workspace']`
+- Clara visibility should use the same notes feature/permission gate
+- add Clara to the pinned-menu metadata (`getMenuItemMeta`) with `href: '/clara'`
+- render Clara in both collapsed and expanded pinned menu item branches
+- use the existing `Mic` icon unless the icon set changes
+
 If adding a top-level app feature:
 - update both collapsed and expanded sidebar variants if appropriate
 - verify the route works with authenticated app layout
 - confirm the control remains visible when the sidebar is open
+
+## Future Upstream Merge Guidance
+
+When merging upstream changes into this branch:
+- preserve upstream broad platform changes by default, especially async backend work, pinned notes, pinned menu, chat task/queue behavior, and unrelated infrastructure changes
+- preserve local Clara files and integrations when upstream deletes or omits them
+- reapply Clara-specific hooks on top of upstream's newer files instead of taking entire local versions of large shared files
+- for audio conflicts, keep Clara cumulative transcription sessions while preserving upstream async/non-blocking STT behavior
+- for notes conflicts, keep upstream async router/model and pinned-note additions while preserving Clara note actions and null-safe `data`/`meta` merges
+- for chat conflicts, keep upstream task/queue active-state logic while preserving the Clara `Back to Estimate` affordance
+- if preserving Clara would require changing away from session-based recording or dropping saved estimate restore/edit/PDF behavior, stop and discuss before implementing that deviation
 
 ## Debugging Checklist
 
